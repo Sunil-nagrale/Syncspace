@@ -1,0 +1,303 @@
+// SyncSpace — Prisma ORM 7 Database Schema
+// PostgreSQL datasource with Better Auth and multi-tenant domain models
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// =============================================================================
+// Better Auth Core Authentication Models
+// =============================================================================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // SyncSpace profile extension
+  color         String    @default("#6366F1")
+
+  // Authentication relations
+  sessions      Session[]
+  accounts      Account[]
+
+  // Tenancy & workspace relations
+  workspaceMembers    WorkspaceMember[]
+  createdWorkspaces   Workspace[]         @relation("WorkspaceCreatedBy")
+  createdProjects     Project[]           @relation("ProjectCreatedBy")
+  createdArtifacts    Artifact[]          @relation("ArtifactCreatedBy")
+  updatedArtifacts    Artifact[]          @relation("ArtifactUpdatedBy")
+  artifactPermissions ArtifactPermission[]
+  versionsCreated     ArtifactVersion[]   @relation("VersionCreatedBy")
+  attachmentsUploaded Attachment[]        @relation("AttachmentUploadedBy")
+  activityEvents      ActivityEvent[]     @relation("ActivityUser")
+  invitationsSent     Invitation[]        @relation("InvitationSender")
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// =============================================================================
+// Tenancy & Workspace Management Models
+// =============================================================================
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+model Workspace {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  logoUrl     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+  createdBy   User?    @relation("WorkspaceCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  members        WorkspaceMember[]
+  invitations    Invitation[]
+  projects       Project[]
+  artifacts      Artifact[]
+  attachments    Attachment[]
+  activityEvents ActivityEvent[]
+
+  @@index([slug])
+  @@map("workspace")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        WorkspaceRole @default(EDITOR)
+  joinedAt    DateTime      @default(now())
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@index([workspaceId, role])
+  @@map("workspace_member")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+model Invitation {
+  id          String           @id @default(cuid())
+  workspaceId String
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  email       String
+  role        WorkspaceRole    @default(EDITOR)
+  token       String           @unique
+  invitedById String
+  invitedBy   User             @relation("InvitationSender", fields: [invitedById], references: [id], onDelete: Cascade)
+  status      InvitationStatus @default(PENDING)
+  expiresAt   DateTime
+  createdAt   DateTime         @default(now())
+
+  @@index([workspaceId, email])
+  @@index([token, status])
+  @@map("invitation")
+}
+
+// =============================================================================
+// Projects & Polymorphic Artifacts
+// =============================================================================
+
+model Project {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  icon        String?
+  color       String?
+  isArchived  Boolean   @default(false)
+  createdById String
+  createdBy   User      @relation("ProjectCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  artifacts Artifact[]
+
+  @@index([workspaceId, isArchived])
+  @@index([createdById])
+  @@map("project")
+}
+
+enum ArtifactType {
+  DOCUMENT
+  WHITEBOARD
+}
+
+model Artifact {
+  id               String       @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId        String?
+  project          Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  type             ArtifactType
+  title            String       @default("Untitled")
+  description      String?
+  icon             String?
+  coverImageUrl    String?
+  liveblocksRoomId String       @unique
+  isPinned         Boolean      @default(false)
+  isArchived       Boolean      @default(false)
+  createdById      String
+  createdBy        User         @relation("ArtifactCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  updatedById      String?
+  updatedBy        User?        @relation("ArtifactUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  permissions ArtifactPermission[]
+  versions    ArtifactVersion[]
+  attachments Attachment[]
+
+  @@index([workspaceId, projectId, isArchived])
+  @@index([workspaceId, type, updatedAt])
+  @@index([createdById])
+  @@map("artifact")
+}
+
+enum ArtifactRole {
+  EDITOR
+  VIEWER
+  NONE
+}
+
+model ArtifactPermission {
+  id         String       @id @default(cuid())
+  artifactId String
+  artifact   Artifact     @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       ArtifactRole @default(EDITOR)
+  createdAt  DateTime     @default(now())
+
+  @@unique([artifactId, userId])
+  @@index([userId])
+  @@map("artifact_permission")
+}
+
+// =============================================================================
+// Snapshots, Media Attachments & Audit Activity
+// =============================================================================
+
+model ArtifactVersion {
+  id            String   @id @default(cuid())
+  artifactId    String
+  artifact      Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  versionNumber Int
+  title         String
+  snapshotData  Json
+  changeSummary String?
+  createdById   String
+  createdBy     User     @relation("VersionCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+
+  @@unique([artifactId, versionNumber])
+  @@index([artifactId, createdAt])
+  @@map("artifact_version")
+}
+
+model Attachment {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId  String?
+  artifact    Artifact? @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  fileName    String
+  fileType    String
+  fileSize    Int
+  storageKey  String
+  publicUrl   String?
+  uploadedById String
+  uploadedBy  User      @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+
+  @@index([workspaceId])
+  @@index([artifactId])
+  @@map("attachment")
+}
+
+model ActivityEvent {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation("ActivityUser", fields: [userId], references: [id], onDelete: Cascade)
+  action      String
+  entityType  String
+  entityId    String
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@index([userId])
+  @@map("activity_event")
+}
