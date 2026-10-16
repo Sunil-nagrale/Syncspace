@@ -196,25 +196,29 @@ graph LR
   - `npx.cmd playwright test tests/e2e/invitations-and-sharing.spec.ts` (2/2 passed)
   - Playwright regression suite: `collaborative-whiteboards` (2/2 passed), `collaborative-documents` (2/2 passed), `auth-and-workspaces` (2/2 passed).
 
-### Phase 8A: Artifact Comments and Discussion Threads (Completed & Verified)
+### Phase 8A: Artifact Comments, Discussion Threads & Hardening (Completed & Verified)
 
 - **Prerequisites**: Phase 7A complete.
 - **Deliverables**:
-  - Normalized relational data architecture (`CommentThread`, `Comment`, `CommentReaction` models in PostgreSQL with Prisma 7).
-  - Migration `20261016131803_add_artifact_comments` applied cleanly to PostgreSQL.
-  - Complete backend service layer (`CommentService`) covering thread creation, replies, editing, deletion with moderator support, resolving/reopening lifecycle, and reaction toggling with atomic duplicate prevention.
-  - RESTful API endpoints at `/api/artifacts/[artifactId]/comments/*` with strict workspace tenancy and artifact-level access control (`AuthorizationService.requireArtifactAccess`).
+  - Normalized relational data architecture (`CommentThread`, `Comment`, `CommentReaction`, and `CommentThreadEvent` models in PostgreSQL with Prisma 7).
+  - Migrations `20261016131803_add_artifact_comments` and `20261016145124_add_comment_thread_events` applied cleanly to PostgreSQL.
+  - Complete backend service layer (`CommentService`) covering thread creation, replies, editing, deletion with moderator support, resolving/reopening lifecycle, atomic resolution history logging, bounded cursor-based pagination, and concurrency-safe reaction toggling with atomic duplicate prevention.
+  - Separate cursor pagination for thread replies (`listReplies`), preserving the root comment bound to the thread header.
+  - Immutable state transition audit history (`CommentThreadEvent`) preserving previous records across resolve/reopen transitions with idempotence.
+  - RESTful API endpoints at `/api/artifacts/[artifactId]/comments/*` (canonicalized under `threads/[threadId]/...`) with strict workspace tenancy and artifact-level access control (`AuthorizationService.requireArtifactAccess`).
+  - Strict input validation via Zod schemas (`src/lib/validations/comment.ts`) enforcing max 5,000 characters, typed anchor data validation (`GENERAL`, `TEXT_SELECTION`, `CANVAS_ELEMENT`, `CANVAS_COORDINATE`), and max 10KB payloads.
+  - Outgoing DTO privacy: user email addresses strictly omitted to prevent PII leakage.
   - IDOR security defense returning 404 for non-members and 403 for revoked `NONE` overrides.
   - Universal responsive discussion panel (`ArtifactDiscussionPanel`) integrated into both collaborative documents (`/app/documents/[documentId]`) and collaborative whiteboards (`/app/whiteboards/[boardId]`).
-  - Tab filtering (Open / Resolved / All), thread resolution, inline reply composer, emoji reaction pills and quick-picker, author-only edit dialog, and delete confirmation modal.
+  - Tab filtering (Open / Resolved / All), thread resolution, inline reply composer, emoji reaction pills and quick-picker, author-only edit dialog, delete confirmation modal, cursor-based "Load more discussions" and "Load more replies" buttons, and expandable resolution audit history drawer.
 - **Automated Verification**:
-  - `npm.cmd run test:integration` (4 files, 19 passed, 0 failed, includes 7 dedicated database integration tests in `comments.test.ts`)
-  - `npm.cmd run test` (9 files, 65 passed, 0 failed)
+  - `npm.cmd run test:integration` (4 files, 24 passed, 0 failed, includes 12 dedicated database integration tests in `comments.test.ts`)
+  - `npm.cmd run test` (9 files, 70 passed, 0 failed)
   - `npm.cmd run lint` (0 errors, 0 warnings)
   - `npx.cmd tsc --noEmit` (0 errors)
-  - `npm.cmd run build` (18/18 routes compiled clean, all comment API endpoints generated)
+  - `npm.cmd run build` (18/18 routes compiled clean, all canonical comment API endpoints generated)
   - `npx.cmd playwright test tests/e2e/artifact-comments.spec.ts` (2/2 passed)
-  - Playwright regression suite: `invitations-and-sharing` (2/2 passed), `collaborative-whiteboards` (2/2 passed), `collaborative-documents` (2/2 passed), `auth-and-workspaces` (2/2 passed).
+  - Full Playwright regression suite: `npx.cmd playwright test` (17/17 passed across all 5 e2e specs).
 
 ### Phase 8B: Mentions, Activity Feeds & Notification Delivery (Next Phase)
 

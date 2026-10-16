@@ -5,6 +5,7 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import { toggleReactionSchema } from "@/lib/validations/comment";
 
 export async function POST(
   req: Request,
@@ -17,20 +18,32 @@ export async function POST(
     }
 
     const { commentId } = await params;
-    const body = await req.json();
-    const { emoji } = body as { emoji?: string };
+    if (!commentId || typeof commentId !== "string" || !commentId.trim()) {
+      return NextResponse.json({ error: "Comment ID is required." }, { status: 400 });
+    }
 
-    if (!emoji || typeof emoji !== "string" || !emoji.trim()) {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON request body." }, { status: 400 });
+    }
+
+    const parseResult = toggleReactionSchema.safeParse(body);
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Valid emoji string is required." },
+        { error: parseResult.error.issues[0]?.message || "Invalid reaction emoji." },
         { status: 400 }
       );
     }
 
+    const { emoji, intent } = parseResult.data;
+
     const result = await CommentService.toggleReaction({
       actorUserId: session.user.id,
       commentId,
-      emoji: emoji.trim(),
+      emoji,
+      intent,
     });
 
     return NextResponse.json({ data: result });
@@ -44,8 +57,7 @@ export async function POST(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("POST /api/artifacts/[artifactId]/comments/items/[commentId]/reactions error:", err);
+    return NextResponse.json({ error: "Failed to toggle reaction." }, { status: 500 });
   }
 }

@@ -140,7 +140,7 @@ test("concurrent document editing converges deterministically", async ({ browser
    - Playwright restores network via `page.setOffline(false)`.
    - Both clients sync and converge to the updated text.
 5. **Persistence After Refresh**: Reloading the page reloads the exact latest Yjs and Excalidraw content from room storage without state regression.
-6. **Artifact Discussions & Reactions**: Multi-user thread creation, replies, reaction toggling, and resolve/reopen lifecycle across collaborative documents and whiteboards, with unauthenticated (401) and cross-workspace outsider (404) security rejection.
+6. **Artifact Discussions, Reactions & Hardening**: Multi-user thread creation, bounded cursor pagination, replies, concurrency-safe reaction toggling, and resolve/reopen lifecycle with audit history across collaborative documents and whiteboards, with unauthenticated (401) and cross-workspace outsider (404) security rejection.
 
 ---
 

@@ -387,4 +387,246 @@ describe("Phase 8A — Artifact Comments and Discussion Threads Integration Test
       })
     ).rejects.toThrowError(AuthorizationError);
   });
+
+  it("supports bounded cursor-based pagination for threads and computes accurate counts", async () => {
+    const { owner, artifact } = await setupTestEnvironment();
+
+    // Create 25 distinct threads
+    const createdThreadIds: string[] = [];
+    for (let i = 1; i <= 25; i++) {
+      const thread = await CommentService.createThread({
+        actorUserId: owner.id,
+        artifactId: artifact.id,
+        content: `Discussion thread #${i.toString().padStart(2, "0")}`,
+      });
+      createdThreadIds.push(thread.id);
+    }
+
+    // Page 1: limit 20
+    const page1 = await CommentService.listThreads(owner.id, artifact.id, {
+      limit: 20,
+    });
+    expect(page1.length).toBe(20);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.nextCursor).toBe(page1[19].id);
+    expect(page1.openCount).toBe(25);
+    expect(page1.resolvedCount).toBe(0);
+    expect(page1.totalCount).toBe(25);
+
+    // Page 2: limit 20 with cursor from page 1
+    const page2 = await CommentService.listThreads(owner.id, artifact.id, {
+      limit: 20,
+      cursor: page1.nextCursor!,
+    });
+    expect(page2.length).toBe(5);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.nextCursor).toBeNull();
+    expect(page2.openCount).toBe(25);
+
+    // Verify union of IDs is exactly 25 unique items
+    const combinedIds = [...page1.map((t) => t.id), ...page2.map((t) => t.id)];
+    expect(new Set(combinedIds).size).toBe(25);
+    expect(combinedIds).toEqual(createdThreadIds.slice().reverse());
+  });
+
+  it("supports bounded cursor-based pagination for replies excluding root comment", async () => {
+    const { owner, editor, artifact } = await setupTestEnvironment();
+
+    const thread = await CommentService.createThread({
+      actorUserId: owner.id,
+      artifactId: artifact.id,
+      content: "Main discussion topic",
+    });
+
+    const rootCommentId = thread.comments[0].id;
+
+    // Create 25 replies
+    const createdReplyIds: string[] = [];
+    for (let i = 1; i <= 25; i++) {
+      const reply = await CommentService.createReply({
+        actorUserId: editor.id,
+        threadId: thread.id,
+        content: `Thread reply #${i.toString().padStart(2, "0")}`,
+      });
+      createdReplyIds.push(reply.id);
+    }
+
+    // Page 1: limit 10
+    const page1 = await CommentService.listReplies({
+      actorUserId: owner.id,
+      threadId: thread.id,
+      limit: 10,
+    });
+    expect(page1.replies.length).toBe(10);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.totalCount).toBe(25);
+    expect(page1.replies.some((r) => r.id === rootCommentId)).toBe(false);
+    expect(page1.nextCursor).toBe(page1.replies[9].id);
+
+    // Page 2: limit 10 with cursor from page 1
+    const page2 = await CommentService.listReplies({
+      actorUserId: owner.id,
+      threadId: thread.id,
+      limit: 10,
+      cursor: page1.nextCursor!,
+    });
+    expect(page2.replies.length).toBe(10);
+    expect(page2.hasMore).toBe(true);
+    expect(page2.nextCursor).toBe(page2.replies[9].id);
+
+    // Page 3: limit 10 with cursor from page 2
+    const page3 = await CommentService.listReplies({
+      actorUserId: owner.id,
+      threadId: thread.id,
+      limit: 10,
+      cursor: page2.nextCursor!,
+    });
+    expect(page3.replies.length).toBe(5);
+    expect(page3.hasMore).toBe(false);
+    expect(page3.nextCursor).toBeNull();
+
+    // Verify all 25 replies were retrieved without duplicates and in chronological order
+    const allRetrievedIds = [
+      ...page1.replies.map((r) => r.id),
+      ...page2.replies.map((r) => r.id),
+      ...page3.replies.map((r) => r.id),
+    ];
+    expect(allRetrievedIds).toEqual(createdReplyIds);
+  });
+
+  it("records immutable resolution and reopening events, preserving history across transitions", async () => {
+    const { owner, editor, artifact } = await setupTestEnvironment();
+
+    const thread = await CommentService.createThread({
+      actorUserId: owner.id,
+      artifactId: artifact.id,
+      content: "Thread for audit history testing",
+    });
+
+    // Initially no events
+    const initialEvents = await CommentService.getThreadEvents(owner.id, thread.id);
+    expect(initialEvents.length).toBe(0);
+
+    // 1. Editor resolves the thread
+    await CommentService.resolveThread(editor.id, thread.id);
+    let events = await CommentService.getThreadEvents(owner.id, thread.id);
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe("RESOLVED");
+    expect(events[0].user.id).toBe(editor.id);
+
+    // 2. Calling resolve again when already resolved is idempotent (does not duplicate event)
+    await CommentService.resolveThread(owner.id, thread.id);
+    events = await CommentService.getThreadEvents(owner.id, thread.id);
+    expect(events.length).toBe(1);
+
+    // 3. Owner reopens the thread
+    await CommentService.reopenThread(owner.id, thread.id);
+    events = await CommentService.getThreadEvents(owner.id, thread.id);
+    expect(events.length).toBe(2);
+    expect(events[0].type).toBe("RESOLVED");
+    expect(events[1].type).toBe("REOPENED");
+    expect(events[1].user.id).toBe(owner.id);
+
+    // 4. Calling reopen again when already open is idempotent
+    await CommentService.reopenThread(editor.id, thread.id);
+    events = await CommentService.getThreadEvents(owner.id, thread.id);
+    expect(events.length).toBe(2);
+
+    // 5. Editor resolves again
+    await CommentService.resolveThread(editor.id, thread.id);
+    events = await CommentService.getThreadEvents(owner.id, thread.id);
+    expect(events.length).toBe(3);
+    expect(events[2].type).toBe("RESOLVED");
+    expect(events[2].user.id).toBe(editor.id);
+  });
+
+  it("handles concurrent reaction operations safely without unhandled 500s or constraint failures", async () => {
+    const { owner, editor, viewer, artifact } = await setupTestEnvironment();
+
+    const thread = await CommentService.createThread({
+      actorUserId: owner.id,
+      artifactId: artifact.id,
+      content: "Concurrent reaction testing comment",
+    });
+    const commentId = thread.comments[0].id;
+
+    // Concurrent adds from multiple distinct users
+    const results = await Promise.all([
+      CommentService.toggleReaction({ actorUserId: owner.id, commentId, emoji: "🚀", intent: "add" }),
+      CommentService.toggleReaction({ actorUserId: editor.id, commentId, emoji: "🚀", intent: "add" }),
+      CommentService.toggleReaction({ actorUserId: viewer.id, commentId, emoji: "🚀", intent: "add" }),
+    ]);
+
+    expect(results.every((r) => r.action === "added")).toBe(true);
+
+    // Verify comment reactions aggregate
+    let threads = await CommentService.listThreads(owner.id, artifact.id);
+    let rocketReaction = threads[0].comments[0].reactions.find((r) => r.emoji === "🚀");
+    expect(rocketReaction?.count).toBe(3);
+
+    // Rapid concurrent toggles by the same user do not throw unhandled exceptions
+    const togglePromises = Array.from({ length: 6 }).map(() =>
+      CommentService.toggleReaction({ actorUserId: editor.id, commentId, emoji: "🔥" })
+    );
+
+    const toggleResults = await Promise.allSettled(togglePromises);
+    expect(toggleResults.every((r) => r.status === "fulfilled")).toBe(true);
+  });
+
+  it("validates anchors strictly and prevents malformed anchor data", async () => {
+    const { owner, artifact } = await setupTestEnvironment();
+
+    // 1. Valid TEXT_SELECTION anchor
+    const textThread = await CommentService.createThread({
+      actorUserId: owner.id,
+      artifactId: artifact.id,
+      content: "Discussion on paragraph 2",
+      anchorType: "TEXT_SELECTION",
+      anchorData: { from: 10, to: 42, quote: "selected text" },
+    });
+    expect(textThread.anchorType).toBe("TEXT_SELECTION");
+    expect(textThread.anchorData).toEqual({ from: 10, to: 42, quote: "selected text" });
+
+    // 2. Valid CANVAS_ELEMENT anchor
+    const canvasElThread = await CommentService.createThread({
+      actorUserId: owner.id,
+      artifactId: artifact.id,
+      content: "Discussion on canvas rectangle",
+      anchorType: "CANVAS_ELEMENT",
+      anchorData: { elementId: "rect_123" },
+    });
+    expect(canvasElThread.anchorType).toBe("CANVAS_ELEMENT");
+
+    // 3. Valid CANVAS_COORDINATE anchor
+    const canvasCoordThread = await CommentService.createThread({
+      actorUserId: owner.id,
+      artifactId: artifact.id,
+      content: "Pin at coordinate (150, 300)",
+      anchorType: "CANVAS_COORDINATE",
+      anchorData: { x: 150, y: 300 },
+    });
+    expect(canvasCoordThread.anchorType).toBe("CANVAS_COORDINATE");
+
+    // 4. Invalid TEXT_SELECTION: 'to' < 'from'
+    await expect(
+      CommentService.createThread({
+        actorUserId: owner.id,
+        artifactId: artifact.id,
+        content: "Invalid text range",
+        anchorType: "TEXT_SELECTION",
+        anchorData: { from: 50, to: 10 },
+      })
+    ).rejects.toThrowError(AuthorizationError);
+
+    // 5. Invalid CANVAS_COORDINATE: non-finite coordinate
+    await expect(
+      CommentService.createThread({
+        actorUserId: owner.id,
+        artifactId: artifact.id,
+        content: "Invalid coordinate",
+        anchorType: "CANVAS_COORDINATE",
+        anchorData: { x: "invalid", y: 300 },
+      })
+    ).rejects.toThrowError(AuthorizationError);
+  });
 });

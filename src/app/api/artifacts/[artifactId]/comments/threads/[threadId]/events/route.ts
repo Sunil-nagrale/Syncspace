@@ -6,7 +6,7 @@ import {
   NotFoundError,
 } from "@/services/authorization.service";
 
-export async function PATCH(
+export async function GET(
   req: Request,
   { params }: { params: Promise<{ artifactId: string; threadId: string }> }
 ) {
@@ -17,22 +17,13 @@ export async function PATCH(
     }
 
     const { threadId } = await params;
-    const body = await req.json();
-    const { action } = body as { action?: "resolve" | "reopen" };
-
-    if (action !== "resolve" && action !== "reopen") {
-      return NextResponse.json(
-        { error: "Invalid action. Expected 'resolve' or 'reopen'." },
-        { status: 400 }
-      );
+    if (!threadId || typeof threadId !== "string" || !threadId.trim()) {
+      return NextResponse.json({ error: "Thread ID is required." }, { status: 400 });
     }
 
-    const thread =
-      action === "resolve"
-        ? await CommentService.resolveThread(session.user.id, threadId)
-        : await CommentService.reopenThread(session.user.id, threadId);
+    const events = await CommentService.getThreadEvents(session.user.id, threadId);
 
-    return NextResponse.json({ data: thread });
+    return NextResponse.json({ data: events });
   } catch (err: unknown) {
     if (err instanceof NotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });
@@ -43,8 +34,7 @@ export async function PATCH(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("GET /api/artifacts/[artifactId]/comments/threads/[threadId]/events error:", err);
+    return NextResponse.json({ error: "Failed to retrieve thread events." }, { status: 500 });
   }
 }

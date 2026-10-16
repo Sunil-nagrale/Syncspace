@@ -14,7 +14,10 @@ test.describe("SyncSpace Phase 8A — Artifact Comments and Discussion Threads E
       const userIds = users.map((u) => u.id);
 
       if (userIds.length > 0) {
-        // Clean up threads, comments, and reactions first
+        // Clean up threads, comments, reactions, and thread events first
+        await prisma.commentThreadEvent.deleteMany({
+          where: { userId: { in: userIds } },
+        });
         await prisma.commentReaction.deleteMany({
           where: { userId: { in: userIds } },
         });
@@ -207,7 +210,10 @@ test.describe("SyncSpace Phase 8A — Artifact Comments and Discussion Threads E
     // Owner resolves the thread
     const resolveBtn = ownerPage.getByTestId(`thread-resolve-button-${dbThread!.id}`);
     await expect(resolveBtn).toBeVisible();
-    await resolveBtn.click();
+    await Promise.all([
+      ownerPage.waitForResponse((res) => res.url().includes("/threads/") && res.request().method() === "PATCH"),
+      resolveBtn.click(),
+    ]);
 
     // Under "Open" filter, the resolved thread is hidden or moves to empty state
     await expect(ownerPage.getByTestId("comments-empty-state")).toBeVisible();
@@ -217,14 +223,31 @@ test.describe("SyncSpace Phase 8A — Artifact Comments and Discussion Threads E
     await expect(commentsPanel.getByText(rootThreadText)).toBeVisible();
     await expect(commentsPanel.getByText(/Resolved by Alice Owner/i)).toBeVisible();
 
+    // Verify Resolution Audit History drawer
+    const historyBtn = ownerPage.getByTestId(`thread-history-button-${dbThread!.id}`);
+    await expect(historyBtn).toBeVisible();
+    await historyBtn.click();
+    const historyList = ownerPage.getByTestId(`thread-history-list-${dbThread!.id}`);
+    await expect(historyList).toBeVisible();
+    await expect(historyList.getByText(/Resolved/i)).toBeVisible();
+    await expect(historyList.getByText(/Alice Owner/i)).toBeVisible();
+
     // Reopen thread
     const reopenBtn = ownerPage.getByTestId(`thread-resolve-button-${dbThread!.id}`);
     await expect(reopenBtn).toBeVisible();
-    await reopenBtn.click();
+    await Promise.all([
+      ownerPage.waitForResponse((res) => res.url().includes("/threads/") && res.request().method() === "PATCH"),
+      reopenBtn.click(),
+    ]);
 
     // Switch back to "Open" tab
     await ownerPage.getByTestId("comments-filter-open").click();
     await expect(commentsPanel.getByText(rootThreadText)).toBeVisible();
+
+    // Re-verify history drawer shows both Resolved and Reopened transitions
+    await historyBtn.click();
+    await expect(historyList).toBeVisible();
+    await expect(historyList.getByText(/Reopened/i)).toBeVisible();
 
     // 10. Security & IDOR Verification
     // A) Unauthenticated request to comments API returns 401

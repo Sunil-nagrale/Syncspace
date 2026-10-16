@@ -44,6 +44,7 @@ model User {
   resolvedThreads     CommentThread[]     @relation("ThreadResolvedBy")
   comments            Comment[]           @relation("CommentAuthor")
   commentReactions    CommentReaction[]   @relation("CommentReactionUser")
+  commentThreadEvents CommentThreadEvent[] @relation("ThreadEventUser")
 
   @@map("user")
 }
@@ -119,10 +120,11 @@ model Workspace {
   members        WorkspaceMember[]
   invitations    Invitation[]
   projects       Project[]
-  artifacts      Artifact[]
-  attachments    Attachment[]
-  activityEvents ActivityEvent[]
-  commentThreads CommentThread[]
+  artifacts           Artifact[]
+  attachments         Attachment[]
+  activityEvents      ActivityEvent[]
+  commentThreads      CommentThread[]
+  commentThreadEvents CommentThreadEvent[]
 
   @@index([slug])
   @@map("workspace")
@@ -221,8 +223,9 @@ model Artifact {
 
   permissions ArtifactPermission[]
   versions    ArtifactVersion[]
-  attachments Attachment[]
+  attachments    Attachment[]
   commentThreads CommentThread[]
+  commentThreadEvents CommentThreadEvent[]
 
   @@index([workspaceId, projectId, isArchived])
   @@index([workspaceId, type, updatedAt])
@@ -330,8 +333,9 @@ model CommentThread {
   updatedAt        DateTime          @updatedAt
 
   comments         Comment[]
+  events           CommentThreadEvent[]
 
-  @@index([artifactId, isResolved])
+  @@index([artifactId, isResolved, createdAt])
   @@index([workspaceId])
   @@index([createdById])
   @@map("comment_thread")
@@ -368,4 +372,29 @@ model CommentReaction {
   @@index([commentId])
   @@index([userId])
   @@map("comment_reaction")
+}
+
+enum CommentThreadEventType {
+  RESOLVED
+  REOPENED
+}
+
+model CommentThreadEvent {
+  id          String                 @id @default(cuid())
+  threadId    String
+  thread      CommentThread          @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId  String
+  artifact    Artifact               @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                   @relation("ThreadEventUser", fields: [userId], references: [id], onDelete: Cascade)
+  type        CommentThreadEventType
+  createdAt   DateTime               @default(now())
+
+  @@index([threadId, createdAt])
+  @@index([artifactId, createdAt])
+  @@index([workspaceId])
+  @@index([userId])
+  @@map("comment_thread_event")
 }

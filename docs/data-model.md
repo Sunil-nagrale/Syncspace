@@ -246,7 +246,7 @@ Individual comment item (root comment or chronological reply) inside a `CommentT
   - `id`: `String` (cuid, Primary Key)
   - `threadId`: `String` (Foreign Key -> `CommentThread.id`, Cascades)
   - `authorId`: `String` (Foreign Key -> `User.id`, Cascades)
-  - `content`: `String` (Text, max 10,000 chars)
+  - `content`: `String` (Text, max 5,000 chars)
   - `isEdited`: `Boolean` (Default: `false`)
   - `editedAt`: `DateTime?`
   - `createdAt`: `DateTime` (Default: `now()`)
@@ -270,6 +270,24 @@ Lightweight emoji reaction on an individual comment item.
   - `@@unique([commentId, userId, emoji])` (Strict database guarantee preventing duplicate reactions)
   - `@@index([commentId])`
   - `@@index([userId])`
+
+#### `CommentThreadEvent`
+Immutable state transition audit log for discussion threads (`RESOLVED` and `REOPENED`).
+- **Fields**:
+  - `id`: `String` (cuid, Primary Key)
+  - `threadId`: `String` (Foreign Key -> `CommentThread.id`, Cascades)
+  - `workspaceId`: `String` (Foreign Key -> `Workspace.id`, Cascades)
+  - `artifactId`: `String` (Foreign Key -> `Artifact.id`, Cascades)
+  - `userId`: `String` (Foreign Key -> `User.id`, Cascades)
+  - `type`: `CommentThreadEventType` (`RESOLVED`, `REOPENED`)
+  - `createdAt`: `DateTime` (Default: `now()`)
+- **Constraints & Indexes**:
+  - `@@index([threadId, createdAt])`
+  - `@@index([artifactId, createdAt])`
+  - `@@index([workspaceId])`
+  - `@@index([userId])`
+- **Audit Invariant**:
+  - Events are strictly append-only. Reopening a thread appends a `REOPENED` event and preserves all historical `RESOLVED` records. Duplicate state mutations are idempotent.
 
 ---
 

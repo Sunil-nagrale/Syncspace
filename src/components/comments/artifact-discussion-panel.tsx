@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   MessageSquare,
   CheckCircle2,
@@ -15,6 +15,8 @@ import {
   AlertCircle,
   Clock,
   Pin,
+  History,
+  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -39,7 +41,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { FormattedThread, FormattedComment } from "@/services/comment.service";
+import type {
+  FormattedThread,
+  FormattedComment,
+  FormattedThreadEvent,
+} from "@/services/comment.service";
+import { MAX_COMMENT_LENGTH } from "@/lib/validations/comment";
 
 const POPULAR_EMOJIS = ["👍", "❤️", "🎉", "🚀", "👀", "💡"];
 
@@ -105,6 +112,20 @@ export function ArtifactDiscussionPanel({
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"open" | "resolved" | "all">("open");
 
+  // Thread pagination state
+  const [nextThreadCursor, setNextThreadCursor] = useState<string | null>(null);
+  const [hasMoreThreads, setHasMoreThreads] = useState(false);
+  const [isLoadingMoreThreads, setIsLoadingMoreThreads] = useState(false);
+  const [loadMoreThreadsError, setLoadMoreThreadsError] = useState<string | null>(null);
+
+  // Reply pagination state
+  const [loadingRepliesThreadId, setLoadingRepliesThreadId] = useState<string | null>(null);
+
+  // Thread history state (keyed by threadId)
+  const [threadEventsMap, setThreadEventsMap] = useState<Record<string, FormattedThreadEvent[]>>({});
+  const [loadingEventsThreadId, setLoadingEventsThreadId] = useState<string | null>(null);
+  const [expandedHistoryThreadIds, setExpandedHistoryThreadIds] = useState<Set<string>>(new Set());
+
   // New thread composer state
   const [newThreadContent, setNewThreadContent] = useState("");
   const [isSubmittingThread, setIsSubmittingThread] = useState(false);
@@ -123,34 +144,80 @@ export function ArtifactDiscussionPanel({
   const [deleteModalCommentId, setDeleteModalCommentId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Fetch threads from API
-  const fetchThreads = useCallback(async () => {
-    if (!artifactId) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/artifacts/${artifactId}/comments?status=all`);
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || "Failed to load discussions");
+  // Fetch threads from API (with cursor-based pagination)
+  const nextThreadCursorRef = useRef<string | null>(null);
+  nextThreadCursorRef.current = nextThreadCursor;
+
+  const fetchThreads = useCallback(
+    async (isReset = true) => {
+      if (!artifactId) return;
+
+      if (isReset) {
+        setIsLoading(true);
+        setError(null);
+      } else {
+        setIsLoadingMoreThreads(true);
+        setLoadMoreThreadsError(null);
       }
-      const data = await res.json();
-      const loadedThreads: FormattedThread[] = data.data ?? [];
-      setThreads(loadedThreads);
 
-      const openCount = loadedThreads.filter((t) => !t.isResolved).length;
-      onThreadCountChange?.(openCount);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Error fetching discussions";
-      setError(msg);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [artifactId, onThreadCountChange]);
+      try {
+        const cursorParam = !isReset && nextThreadCursorRef.current ? `&cursor=${encodeURIComponent(nextThreadCursorRef.current)}` : "";
+        const statusParam = activeTab === "all" ? "all" : activeTab === "resolved" ? "resolved" : "open";
+        const res = await fetch(`/api/artifacts/${artifactId}/comments?status=${statusParam}&limit=20${cursorParam}`);
 
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.error || "Failed to load discussions");
+        }
+
+        const json = await res.json();
+        // Support dual format: data as array or data with pagination metadata
+        const rawThreads: FormattedThread[] = Array.isArray(json.data)
+          ? json.data
+          : json.data?.threads ?? [];
+
+        const pagination = json.pagination ?? {};
+        const nextCursor = pagination.nextCursor ?? null;
+        const hasMore = Boolean(pagination.hasMore);
+
+        if (isReset) {
+          setThreads(rawThreads);
+        } else {
+          setThreads((prev) => {
+            const existingIds = new Set(prev.map((t) => t.id));
+            const newUnique = rawThreads.filter((t) => !existingIds.has(t.id));
+            return [...prev, ...newUnique];
+          });
+        }
+
+        setNextThreadCursor(nextCursor);
+        setHasMoreThreads(hasMore);
+
+        const openCount = pagination.openCount ?? rawThreads.filter((t) => !t.isResolved).length;
+        onThreadCountChange?.(openCount);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Error fetching discussions";
+        if (isReset) {
+          setError(msg);
+        } else {
+          setLoadMoreThreadsError(msg);
+        }
+      } finally {
+        if (isReset) {
+          setIsLoading(false);
+        } else {
+          setIsLoadingMoreThreads(false);
+        }
+      }
+    },
+    [artifactId, activeTab, onThreadCountChange]
+  );
+
+  // Re-fetch whenever panel is opened or active tab changes
   useEffect(() => {
     if (isOpen) {
-      void fetchThreads();
+      setNextThreadCursor(null);
+      void fetchThreads(true);
     }
   }, [isOpen, fetchThreads]);
 
@@ -178,7 +245,13 @@ export function ArtifactDiscussionPanel({
   // Create new thread
   const handleCreateThread = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!newThreadContent.trim() || isSubmittingThread || !canComment) return;
+    const content = newThreadContent.trim();
+    if (!content || isSubmittingThread || !canComment) return;
+
+    if (content.length > MAX_COMMENT_LENGTH) {
+      setNewThreadError(`Comment exceeds maximum limit of ${MAX_COMMENT_LENGTH} characters.`);
+      return;
+    }
 
     setIsSubmittingThread(true);
     setNewThreadError(null);
@@ -187,7 +260,7 @@ export function ArtifactDiscussionPanel({
       const res = await fetch(`/api/artifacts/${artifactId}/comments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: newThreadContent.trim() }),
+        body: JSON.stringify({ content }),
       });
 
       if (!res.ok) {
@@ -214,6 +287,11 @@ export function ArtifactDiscussionPanel({
     const content = replyInputs[threadId]?.trim();
     if (!content || submittingReplyThreadId || !canComment) return;
 
+    if (content.length > MAX_COMMENT_LENGTH) {
+      alert(`Reply exceeds maximum limit of ${MAX_COMMENT_LENGTH} characters.`);
+      return;
+    }
+
     setSubmittingReplyThreadId(threadId);
 
     try {
@@ -238,6 +316,7 @@ export function ArtifactDiscussionPanel({
               ...t,
               comments: [...t.comments, reply],
               commentCount: t.commentCount + 1,
+              replyCount: t.replyCount + 1,
               updatedAt: reply.createdAt,
             };
           }
@@ -253,9 +332,52 @@ export function ArtifactDiscussionPanel({
     }
   };
 
-  // Toggle resolve / reopen thread
+  // Load more replies for a thread
+  const handleLoadMoreReplies = async (threadId: string) => {
+    const targetThread = threads.find((t) => t.id === threadId);
+    if (!targetThread || !targetThread.nextReplyCursor || loadingRepliesThreadId) return;
+
+    setLoadingRepliesThreadId(threadId);
+
+    try {
+      const res = await fetch(
+        `/api/artifacts/${artifactId}/comments/threads/${threadId}/replies?cursor=${encodeURIComponent(
+          targetThread.nextReplyCursor
+        )}&limit=20`
+      );
+
+      if (!res.ok) throw new Error("Failed to load more replies");
+
+      const json = await res.json();
+      const newReplies: FormattedComment[] = json.data ?? [];
+      const pagination = json.pagination ?? {};
+
+      setThreads((prev) =>
+        prev.map((t) => {
+          if (t.id !== threadId) return t;
+
+          const existingReplyIds = new Set(t.comments.map((c) => c.id));
+          const uniqueNewReplies = newReplies.filter((r) => !existingReplyIds.has(r.id));
+
+          return {
+            ...t,
+            comments: [...t.comments, ...uniqueNewReplies],
+            hasMoreReplies: Boolean(pagination.hasMore),
+            nextReplyCursor: pagination.nextCursor ?? null,
+          };
+        })
+      );
+    } catch (err) {
+      console.error("Error loading more replies:", err);
+    } finally {
+      setLoadingRepliesThreadId(null);
+    }
+  };
+
+  // Toggle resolution status (resolve / reopen)
   const handleToggleResolve = async (threadId: string, currentResolved: boolean) => {
     const action = currentResolved ? "reopen" : "resolve";
+
     try {
       const res = await fetch(`/api/artifacts/${artifactId}/comments/threads/${threadId}`, {
         method: "PATCH",
@@ -271,14 +393,68 @@ export function ArtifactDiscussionPanel({
       const json = await res.json();
       const updated: FormattedThread = json.data;
 
-      setThreads((prev) => prev.map((t) => (t.id === threadId ? updated : t)));
+      setThreads((prev) =>
+        prev.map((t) => {
+          if (t.id === threadId) {
+            return {
+              ...t,
+              isResolved: updated.isResolved,
+              resolvedAt: updated.resolvedAt,
+              resolvedBy: updated.resolvedBy,
+            };
+          }
+          return t;
+        })
+      );
 
-      const newOpenCount = threads.map((t) =>
-        t.id === threadId ? updated : t
-      ).filter((t) => !t.isResolved).length;
-      onThreadCountChange?.(newOpenCount);
+      // Invalidate cached transition events and collapse drawer on state transition
+      setThreadEventsMap((prev) => {
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
+      setExpandedHistoryThreadIds((prev) => {
+        const next = new Set(prev);
+        next.delete(threadId);
+        return next;
+      });
+
+      const newOpenCount = updated.isResolved ? openCount - 1 : openCount + 1;
+      onThreadCountChange?.(Math.max(0, newOpenCount));
     } catch (err) {
-      console.error("Error toggling thread resolve:", err);
+      console.error(`Error ${action}ing thread:`, err);
+    }
+  };
+
+  // Toggle view resolution history
+  const handleToggleHistory = async (threadId: string) => {
+    if (expandedHistoryThreadIds.has(threadId)) {
+      setExpandedHistoryThreadIds((prev) => {
+        const next = new Set(prev);
+        next.delete(threadId);
+        return next;
+      });
+      return;
+    }
+
+    setExpandedHistoryThreadIds((prev) => new Set(prev).add(threadId));
+
+    if (!threadEventsMap[threadId] && !loadingEventsThreadId) {
+      setLoadingEventsThreadId(threadId);
+      try {
+        const res = await fetch(`/api/artifacts/${artifactId}/comments/threads/${threadId}/events`);
+        if (res.ok) {
+          const json = await res.json();
+          setThreadEventsMap((prev) => ({
+            ...prev,
+            [threadId]: json.data ?? [],
+          }));
+        }
+      } catch (err) {
+        console.error("Error fetching thread events:", err);
+      } finally {
+        setLoadingEventsThreadId(null);
+      }
     }
   };
 
@@ -288,20 +464,24 @@ export function ArtifactDiscussionPanel({
     setEditContent(comment.content);
   };
 
-  // Submit comment edit
+  // Save comment edit
   const handleSaveEdit = async (commentId: string) => {
-    if (!editContent.trim() || isSubmittingEdit) return;
+    const trimmed = editContent.trim();
+    if (!trimmed || isSubmittingEdit) return;
+
+    if (trimmed.length > MAX_COMMENT_LENGTH) {
+      alert(`Comment exceeds maximum limit of ${MAX_COMMENT_LENGTH} characters.`);
+      return;
+    }
+
     setIsSubmittingEdit(true);
 
     try {
-      const res = await fetch(
-        `/api/artifacts/${artifactId}/comments/items/${commentId}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: editContent.trim() }),
-        }
-      );
+      const res = await fetch(`/api/artifacts/${artifactId}/comments/items/${commentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: trimmed }),
+      });
 
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -319,6 +499,7 @@ export function ArtifactDiscussionPanel({
       );
 
       setEditingCommentId(null);
+      setEditContent("");
     } catch (err) {
       console.error("Error updating comment:", err);
     } finally {
@@ -326,18 +507,16 @@ export function ArtifactDiscussionPanel({
     }
   };
 
-  // Delete comment confirmation
+  // Confirm delete comment
   const handleConfirmDelete = async () => {
     if (!deleteModalCommentId || isDeleting) return;
+
     setIsDeleting(true);
 
     try {
-      const res = await fetch(
-        `/api/artifacts/${artifactId}/comments/items/${deleteModalCommentId}`,
-        {
-          method: "DELETE",
-        }
-      );
+      const res = await fetch(`/api/artifacts/${artifactId}/comments/items/${deleteModalCommentId}`, {
+        method: "DELETE",
+      });
 
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -345,7 +524,7 @@ export function ArtifactDiscussionPanel({
       }
 
       const json = await res.json();
-      const result = json.data;
+      const result = json.data as { deletedCommentId: string; deletedThreadId?: string };
 
       if (result.deletedThreadId) {
         // Whole thread was deleted
@@ -353,11 +532,15 @@ export function ArtifactDiscussionPanel({
       } else {
         // Single comment reply was deleted
         setThreads((prev) =>
-          prev.map((t) => ({
-            ...t,
-            comments: t.comments.filter((c) => c.id !== deleteModalCommentId),
-            commentCount: t.comments.filter((c) => c.id !== deleteModalCommentId).length,
-          }))
+          prev.map((t) => {
+            const nextComments = t.comments.filter((c) => c.id !== deleteModalCommentId);
+            return {
+              ...t,
+              comments: nextComments,
+              commentCount: nextComments.length,
+              replyCount: Math.max(0, nextComments.length - 1),
+            };
+          })
         );
       }
 
@@ -372,14 +555,11 @@ export function ArtifactDiscussionPanel({
   // Toggle emoji reaction
   const handleToggleReaction = async (commentId: string, emoji: string) => {
     try {
-      const res = await fetch(
-        `/api/artifacts/${artifactId}/comments/items/${commentId}/reactions`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ emoji }),
-        }
-      );
+      const res = await fetch(`/api/artifacts/${artifactId}/comments/items/${commentId}/reactions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ emoji }),
+      });
 
       if (!res.ok) return;
 
@@ -405,10 +585,7 @@ export function ArtifactDiscussionPanel({
                           ...r,
                           count: r.count + 1,
                           hasReacted: true,
-                          users: [
-                            ...r.users,
-                            { id: currentUser?.id ?? "", name: currentUser?.name ?? "You" },
-                          ],
+                          users: [...r.users, { id: currentUser?.id ?? "", name: currentUser?.name ?? "You" }],
                         }
                       : r
                   ),
@@ -537,7 +714,13 @@ export function ArtifactDiscussionPanel({
                 }}
                 className="text-xs min-h-[70px] resize-none mb-2"
                 data-testid="new-thread-textarea"
+                maxLength={MAX_COMMENT_LENGTH}
               />
+              {newThreadContent.length > 4000 && (
+                <div className="text-[10px] text-muted-foreground text-right mb-1">
+                  {newThreadContent.length} / {MAX_COMMENT_LENGTH}
+                </div>
+              )}
               {newThreadError && (
                 <div className="text-[11px] text-destructive mb-2 flex items-center gap-1">
                   <AlertCircle className="h-3 w-3" />
@@ -597,7 +780,7 @@ export function ArtifactDiscussionPanel({
                 variant="outline"
                 size="sm"
                 className="h-6 text-xs mt-1"
-                onClick={() => void fetchThreads()}
+                onClick={() => void fetchThreads(true)}
               >
                 Retry
               </Button>
@@ -632,13 +815,16 @@ export function ArtifactDiscussionPanel({
           {!isLoading && !error && filteredThreads.length > 0 && (
             <div className="space-y-4" data-testid="thread-list">
               {filteredThreads.map((thread) => {
-                const rootComment = thread.comments[0];
+                const rootComment = thread.comments[0] ?? thread.rootComment;
                 const replies = thread.comments.slice(1);
                 const canResolve =
                   currentUser?.id === thread.createdBy.id ||
                   effectiveRole === "OWNER" ||
                   effectiveRole === "ADMIN" ||
                   effectiveRole === "EDITOR";
+
+                const isHistoryExpanded = expandedHistoryThreadIds.has(thread.id);
+                const events = threadEventsMap[thread.id] ?? [];
 
                 return (
                   <div
@@ -682,8 +868,19 @@ export function ArtifactDiscussionPanel({
                         </div>
                       </div>
 
-                      {/* Thread Resolution Toggle & Options */}
+                      {/* Thread Resolution Toggle & History */}
                       <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                          title="View resolution history"
+                          onClick={() => void handleToggleHistory(thread.id)}
+                          data-testid={`thread-history-button-${thread.id}`}
+                        >
+                          <History className="h-3 w-3" />
+                        </Button>
+
                         {canResolve && (
                           <Button
                             variant="ghost"
@@ -732,6 +929,46 @@ export function ArtifactDiscussionPanel({
                       </div>
                     )}
 
+                    {/* Expandable History Drawer */}
+                    {isHistoryExpanded && (
+                      <div
+                        className="px-3 py-2 bg-muted/25 border-b border-border/50 text-[11px] space-y-1 animate-in fade-in-50 duration-150"
+                        data-testid={`thread-history-list-${thread.id}`}
+                      >
+                        <div className="font-semibold text-muted-foreground text-[10px] uppercase tracking-wider mb-1">
+                          Audit History
+                        </div>
+                        {loadingEventsThreadId === thread.id ? (
+                          <div className="flex items-center gap-1.5 text-muted-foreground py-1">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <span>Loading history...</span>
+                          </div>
+                        ) : events.length === 0 ? (
+                          <div className="text-muted-foreground italic py-0.5">
+                            No state transitions recorded yet.
+                          </div>
+                        ) : (
+                          events.map((evt) => (
+                            <div key={evt.id} className="flex items-center justify-between gap-2 py-0.5">
+                              <span className="flex items-center gap-1 text-foreground">
+                                {evt.type === "RESOLVED" ? (
+                                  <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500" />
+                                ) : (
+                                  <RotateCcw className="h-2.5 w-2.5 text-blue-500" />
+                                )}
+                                <span>
+                                  <strong>{evt.type === "RESOLVED" ? "Resolved" : "Reopened"}</strong> by {evt.user.name}
+                                </span>
+                              </span>
+                              <span className="text-[10px] text-muted-foreground">
+                                {formatRelativeTime(evt.createdAt)}
+                              </span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
                     {/* Root Comment Body */}
                     {rootComment && (
                       <div className="p-3">
@@ -741,6 +978,7 @@ export function ArtifactDiscussionPanel({
                               value={editContent}
                               onChange={(e) => setEditContent(e.target.value)}
                               className="text-xs min-h-[60px]"
+                              maxLength={MAX_COMMENT_LENGTH}
                             />
                             <div className="flex justify-end gap-1.5">
                               <Button
@@ -954,6 +1192,7 @@ export function ArtifactDiscussionPanel({
                                     value={editContent}
                                     onChange={(e) => setEditContent(e.target.value)}
                                     className="text-xs min-h-[50px]"
+                                    maxLength={MAX_COMMENT_LENGTH}
                                   />
                                   <div className="flex justify-end gap-1.5">
                                     <Button
@@ -1050,6 +1289,29 @@ export function ArtifactDiscussionPanel({
                       </div>
                     )}
 
+                    {/* Paginated "Load more replies" button */}
+                    {thread.hasMoreReplies && (
+                      <div className="px-4 py-2 bg-muted/15 border-t border-border/40 text-center">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs text-brand-indigo hover:text-brand-indigo/80 font-medium gap-1"
+                          onClick={() => void handleLoadMoreReplies(thread.id)}
+                          disabled={loadingRepliesThreadId === thread.id}
+                          data-testid={`load-more-replies-button-${thread.id}`}
+                        >
+                          {loadingRepliesThreadId === thread.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <ChevronDown className="h-3 w-3" />
+                          )}
+                          <span>
+                            Load more replies ({thread.commentCount - thread.comments.length} remaining)
+                          </span>
+                        </Button>
+                      </div>
+                    )}
+
                     {/* Reply Composer */}
                     {canComment && !thread.isResolved && (
                       <div className="p-2.5 bg-muted/20 border-t border-border/50">
@@ -1072,6 +1334,7 @@ export function ArtifactDiscussionPanel({
                             }}
                             className="flex-1 h-7 text-xs px-2.5 rounded-md border border-input bg-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                             data-testid={`reply-textarea-${thread.id}`}
+                            maxLength={MAX_COMMENT_LENGTH}
                           />
                           <Button
                             size="sm"
@@ -1095,6 +1358,37 @@ export function ArtifactDiscussionPanel({
                   </div>
                 );
               })}
+
+              {/* Load More Threads Pagination Button */}
+              {hasMoreThreads && (
+                <div className="pt-2 pb-4 text-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full text-xs gap-1.5 h-8 border-dashed"
+                    onClick={() => void fetchThreads(false)}
+                    disabled={isLoadingMoreThreads}
+                    data-testid="load-more-threads-button"
+                  >
+                    {isLoadingMoreThreads ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Loading more discussions...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="h-3.5 w-3.5" />
+                        <span>Load more discussions</span>
+                      </>
+                    )}
+                  </Button>
+                  {loadMoreThreadsError && (
+                    <div className="text-[11px] text-destructive mt-1.5">
+                      {loadMoreThreadsError}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </ScrollArea>

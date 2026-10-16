@@ -293,10 +293,28 @@ Collaborative documents and whiteboards require contextual discussions, review t
    - Comment edits are strictly restricted to the comment author (`authorId`).
    - Comment deletion is restricted to either the comment author or workspace moderators (`OWNER` / `ADMIN`).
 
-4. **Duplicate Reaction Prevention**:
-   - A composite unique constraint `@@unique([commentId, userId, emoji])` at the database level guarantees idempotence and prevents race conditions when toggling reactions.
-   - The reaction endpoint toggles: if the reaction exists for that user and emoji, it is deleted; otherwise, it is inserted with an atomic catch on unique constraint violations.
+4. **Concurrency-Safe Reactions & Idempotence**:
+   - A composite unique constraint `@@unique([commentId, userId, emoji])` at the database level guarantees data integrity.
+   - The reaction service implements safe recovery: concurrent add/remove/toggle operations handle `P2002` uniqueness conflicts gracefully without throwing unhandled 500 errors.
+   - Optional `intent: "toggle" | "add" | "remove"` ensures predictable outcomes under concurrent network requests.
 
-5. **Universal Artifact Discussion Panel**:
+5. **Bounded Cursor-Based Pagination**:
+   - Discussion threads are paginated via deterministic cursor `take: limit + 1`, `skip: cursor ? 1 : 0`, ordered by `[{ createdAt: "desc" }, { id: "desc" }]`.
+   - Thread pagination defaults to 20 items (max 50).
+   - Thread replies are paginated separately from the root comment via `listReplies`, preserving the root comment bound to the thread header while streaming remaining replies in chronological order (`[{ createdAt: "asc" }, { id: "asc" }]`).
+
+6. **Immutable State Transition Audit History (`CommentThreadEvent`)**:
+   - Every `RESOLVED` and `REOPENED` transition is recorded atomically within a database transaction in `CommentThreadEvent`.
+   - Transition events capture `threadId`, `workspaceId`, `artifactId`, `userId`, `type`, and `createdAt`.
+   - Audit history is append-only: reopening a resolved thread appends a `REOPENED` event and preserves all historical `RESOLVED` events.
+   - Transition mutations are idempotent: redundant resolve/reopen requests do not duplicate event records.
+
+7. **Strict Validation, DTO Privacy & Route Canonicalization**:
+   - Strict Zod schemas enforce length limits (max 5,000 characters per comment), valid emoji strings (max 16 chars), and anchor data payload bounds (max 10KB).
+   - Anchor types (`GENERAL`, `TEXT_SELECTION`, `CANVAS_ELEMENT`, `CANVAS_COORDINATE`) are validated against schema definitions.
+   - All outgoing DTOs strictly omit user email addresses to prevent accidental PII leakage across workspace members.
+   - API routes are canonicalized under `/api/artifacts/[artifactId]/comments/threads/[threadId]/...` to eliminate duplicate conflicting routes.
+
+8. **Universal Artifact Discussion Panel**:
    - A unified responsive discussion panel (`ArtifactDiscussionPanel`) is integrated into both the document editor (`/app/documents/[documentId]`) and the whiteboard editor (`/app/whiteboards/[boardId]`).
-   - Provides filtering by Open, Resolved, and All threads, inline reply composers, emoji reaction pickers, and live counts.
+   - Features cursor progression ("Load more discussions" and "Load more replies"), resolution audit history drawer, filtering by Open, Resolved, and All threads, inline reply composers, emoji reaction pickers, and live counts.

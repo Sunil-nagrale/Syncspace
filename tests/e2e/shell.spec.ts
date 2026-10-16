@@ -77,7 +77,9 @@ test.describe("SyncSpace Application Shell & Navigation", () => {
   test("whiteboard route renders with floating toolbar and zoom controls", async ({ page }) => {
     await page.goto("/app/whiteboards/board-data-pipeline");
     await expect(page.getByRole("main").getByText("Board Data Pipeline")).toBeVisible();
-    await expect(page.getByText(/Excalidraw Multiplayer Canvas Ready/i)).toBeVisible();
+    await expect(
+      page.locator("[data-testid='excalidraw-canvas-container'] .excalidraw")
+    ).toBeVisible({ timeout: 20000 });
   });
 
   test("custom 404 page renders for nonexistent route", async ({ page }) => {

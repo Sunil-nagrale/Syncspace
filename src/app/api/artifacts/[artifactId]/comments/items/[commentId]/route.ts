@@ -5,6 +5,7 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import { updateCommentSchema } from "@/lib/validations/comment";
 
 export async function PATCH(
   req: Request,
@@ -17,12 +18,21 @@ export async function PATCH(
     }
 
     const { commentId } = await params;
-    const body = await req.json();
-    const { content } = body as { content?: string };
+    if (!commentId || typeof commentId !== "string" || !commentId.trim()) {
+      return NextResponse.json({ error: "Comment ID is required." }, { status: 400 });
+    }
 
-    if (!content || typeof content !== "string" || !content.trim()) {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON request body." }, { status: 400 });
+    }
+
+    const parseResult = updateCommentSchema.safeParse(body);
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Content is required." },
+        { error: parseResult.error.issues[0]?.message || "Invalid comment update content." },
         { status: 400 }
       );
     }
@@ -30,7 +40,7 @@ export async function PATCH(
     const updated = await CommentService.updateComment({
       actorUserId: session.user.id,
       commentId,
-      content,
+      content: parseResult.data.content,
     });
 
     return NextResponse.json({ data: updated });
@@ -44,9 +54,8 @@ export async function PATCH(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("PATCH /api/artifacts/[artifactId]/comments/items/[commentId] error:", err);
+    return NextResponse.json({ error: "Failed to update comment." }, { status: 500 });
   }
 }
 
@@ -61,6 +70,10 @@ export async function DELETE(
     }
 
     const { commentId } = await params;
+    if (!commentId || typeof commentId !== "string" || !commentId.trim()) {
+      return NextResponse.json({ error: "Comment ID is required." }, { status: 400 });
+    }
+
     const result = await CommentService.deleteComment({
       actorUserId: session.user.id,
       commentId,
@@ -77,8 +90,7 @@ export async function DELETE(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("DELETE /api/artifacts/[artifactId]/comments/items/[commentId] error:", err);
+    return NextResponse.json({ error: "Failed to delete comment." }, { status: 500 });
   }
 }

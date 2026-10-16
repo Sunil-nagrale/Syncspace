@@ -5,6 +5,10 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import {
+  listThreadsQuerySchema,
+  createThreadSchema,
+} from "@/lib/validations/comment";
 
 export async function GET(
   req: Request,
@@ -17,20 +21,46 @@ export async function GET(
     }
 
     const { artifactId } = await params;
+    if (!artifactId || typeof artifactId !== "string" || !artifactId.trim()) {
+      return NextResponse.json({ error: "Artifact ID is required." }, { status: 400 });
+    }
+
     const url = new URL(req.url);
-    const statusParam = url.searchParams.get("status");
-    const status =
-      statusParam === "open" || statusParam === "resolved"
-        ? statusParam
-        : "all";
+    const queryParams = {
+      status: url.searchParams.get("status") ?? "open",
+      limit: url.searchParams.get("limit") ?? "20",
+      cursor: url.searchParams.get("cursor") ?? undefined,
+    };
+
+    const parsedQuery = listThreadsQuerySchema.safeParse(queryParams);
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: parsedQuery.error.issues[0]?.message || "Invalid query parameters." },
+        { status: 400 }
+      );
+    }
 
     const threads = await CommentService.listThreads(
       session.user.id,
       artifactId,
-      { status }
+      {
+        status: parsedQuery.data.status,
+        limit: parsedQuery.data.limit,
+        cursor: parsedQuery.data.cursor,
+      }
     );
 
-    return NextResponse.json({ data: threads });
+    return NextResponse.json({
+      data: threads,
+      pagination: {
+        nextCursor: threads.nextCursor,
+        hasMore: threads.hasMore,
+        limit: parsedQuery.data.limit ?? 20,
+        openCount: threads.openCount,
+        resolvedCount: threads.resolvedCount,
+        totalCount: threads.totalCount,
+      },
+    });
   } catch (err: unknown) {
     if (err instanceof NotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });
@@ -41,9 +71,8 @@ export async function GET(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("GET /api/artifacts/[artifactId]/comments error:", err);
+    return NextResponse.json({ error: "Failed to retrieve discussions." }, { status: 500 });
   }
 }
 
@@ -58,16 +87,21 @@ export async function POST(
     }
 
     const { artifactId } = await params;
-    const body = await req.json();
-    const { content, anchorType, anchorData } = body as {
-      content?: string;
-      anchorType?: string;
-      anchorData?: unknown;
-    };
+    if (!artifactId || typeof artifactId !== "string" || !artifactId.trim()) {
+      return NextResponse.json({ error: "Artifact ID is required." }, { status: 400 });
+    }
 
-    if (!content || typeof content !== "string" || !content.trim()) {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON request body." }, { status: 400 });
+    }
+
+    const parseResult = createThreadSchema.safeParse(body);
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Content is required." },
+        { error: parseResult.error.issues[0]?.message || "Invalid comment thread input." },
         { status: 400 }
       );
     }
@@ -75,9 +109,9 @@ export async function POST(
     const thread = await CommentService.createThread({
       actorUserId: session.user.id,
       artifactId,
-      content,
-      anchorType: anchorType ?? "GENERAL",
-      anchorData,
+      content: parseResult.data.content,
+      anchorType: parseResult.data.anchorType,
+      anchorData: parseResult.data.anchorData,
     });
 
     return NextResponse.json({ data: thread }, { status: 201 });
@@ -91,8 +125,7 @@ export async function POST(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("POST /api/artifacts/[artifactId]/comments error:", err);
+    return NextResponse.json({ error: "Failed to create comment thread." }, { status: 500 });
   }
 }

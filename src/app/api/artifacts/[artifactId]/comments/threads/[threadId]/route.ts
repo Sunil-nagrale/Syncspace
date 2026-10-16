@@ -5,6 +5,7 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import { threadActionSchema } from "@/lib/validations/comment";
 
 export async function PATCH(
   req: Request,
@@ -17,15 +18,26 @@ export async function PATCH(
     }
 
     const { threadId } = await params;
-    const body = await req.json();
-    const { action } = body as { action?: "resolve" | "reopen" };
+    if (!threadId || typeof threadId !== "string" || !threadId.trim()) {
+      return NextResponse.json({ error: "Thread ID is required." }, { status: 400 });
+    }
 
-    if (action !== "resolve" && action !== "reopen") {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON request body." }, { status: 400 });
+    }
+
+    const parseResult = threadActionSchema.safeParse(body);
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Invalid action. Expected 'resolve' or 'reopen'." },
+        { error: parseResult.error.issues[0]?.message || "Invalid action." },
         { status: 400 }
       );
     }
+
+    const { action } = parseResult.data;
 
     const thread =
       action === "resolve"
@@ -43,8 +55,7 @@ export async function PATCH(
         { status: err.statusCode }
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Internal server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("PATCH /api/artifacts/[artifactId]/comments/threads/[threadId] error:", err);
+    return NextResponse.json({ error: "Failed to update thread status." }, { status: 500 });
   }
 }

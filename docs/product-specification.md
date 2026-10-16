@@ -170,8 +170,9 @@ SyncSpace takes inspiration from:
     - Comment authors can edit their own comments; edits display an `(edited)` indicator.
     - Comment authors or workspace moderators (`OWNER` / `ADMIN`) can delete comments; deleting a root comment deletes the entire thread.
     - Users can toggle emoji reactions on any comment with database-enforced unique constraints preventing duplicate reactions.
-    - Threads can be marked resolved or reopened by authors, editors, or admins; tab filters allow viewing Open, Resolved, or All discussions.
-    - IDOR security isolation ensures non-members receive 404 Not Found and revoked `NONE` overrides receive 403 Forbidden.
+    - Threads can be marked resolved or reopened by authors, editors, or admins with an immutable, append-only audit trail (`CommentThreadEvent`); tab filters allow viewing Open, Resolved, or All discussions.
+    - Discussions support bounded cursor-based pagination (default 20, max 50) and separate reply pagination with "Load more" progression.
+    - IDOR security isolation ensures non-members receive 404 Not Found and revoked `NONE` overrides receive 403 Forbidden; user email addresses are omitted from DTOs.
 
 ---
 
