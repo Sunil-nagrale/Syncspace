@@ -17,10 +17,12 @@ import type {
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { useTheme } from "next-themes";
 
+import { updateWhiteboardDomAttributes } from "./reconciliation";
+
 export interface ExcalidrawCanvasInnerProps {
   excalidrawAPIRef: React.MutableRefObject<ExcalidrawImperativeAPI | null>;
   viewModeEnabled: boolean;
-  collaborators: Map<string, Collaborator>;
+  collaborators?: Map<string, Collaborator>;
   onChange: (
     elements: readonly ExcalidrawElement[],
     appState: AppState,
@@ -48,11 +50,8 @@ export default function ExcalidrawCanvasInner({
   const handleExcalidrawApi = useCallback(
     (api: ExcalidrawImperativeAPI) => {
       excalidrawAPIRef.current = api;
-      if (typeof window !== "undefined") {
-        (window as unknown as { __EXCALIDRAW_API__?: ExcalidrawImperativeAPI }).__EXCALIDRAW_API__ = api;
-        (window as unknown as { __LATEST_ELEMENTS__?: readonly ExcalidrawElement[] }).__LATEST_ELEMENTS__ =
-          api.getSceneElementsIncludingDeleted();
-      }
+      const initialElements = api.getSceneElementsIncludingDeleted();
+      updateWhiteboardDomAttributes(containerRef.current, initialElements);
     },
     [excalidrawAPIRef]
   );
@@ -63,20 +62,10 @@ export default function ExcalidrawCanvasInner({
       appState: AppState,
       files: BinaryFiles
     ) => {
-      if (typeof window !== "undefined") {
-        (window as unknown as { __LATEST_ELEMENTS__?: readonly ExcalidrawElement[] }).__LATEST_ELEMENTS__ = elements;
-        if (excalidrawAPIRef.current) {
-          (window as unknown as { __EXCALIDRAW_API__?: ExcalidrawImperativeAPI }).__EXCALIDRAW_API__ =
-            excalidrawAPIRef.current;
-        }
-      }
-      const activeCount = elements.filter((el) => !el.isDeleted).length;
-      if (containerRef.current) {
-        containerRef.current.setAttribute("data-active-count", String(activeCount));
-      }
+      updateWhiteboardDomAttributes(containerRef.current, elements);
       onChange(elements, appState, files);
     },
-    [onChange, excalidrawAPIRef]
+    [onChange]
   );
 
   useEffect(() => {

@@ -13,28 +13,15 @@ interface ExcalidrawElementSnapshot {
 }
 
 async function getActiveSceneElements(page: Page): Promise<ExcalidrawElementSnapshot[]> {
-  return page.evaluate(() => {
-    const w = window as any;
-    const elements =
-      Array.isArray(w.__LATEST_ELEMENTS__) && w.__LATEST_ELEMENTS__.length > 0
-        ? w.__LATEST_ELEMENTS__
-        : typeof w.__GET_SCENE_ELEMENTS__ === "function"
-        ? w.__GET_SCENE_ELEMENTS__()
-        : w.__EXCALIDRAW_API__
-        ? w.__EXCALIDRAW_API__.getSceneElementsIncludingDeleted()
-        : [];
-
-    return elements
-      .filter((el: any) => !el.isDeleted)
-      .map((el: any) => ({
-        id: el.id,
-        type: el.type,
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        width: Math.round(el.width),
-        height: Math.round(el.height),
-      }));
-  });
+  const container = page.getByTestId("excalidraw-canvas-container");
+  await expect(container).toBeAttached();
+  const rawJson = await container.getAttribute("data-active-elements");
+  if (!rawJson) return [];
+  try {
+    return JSON.parse(rawJson) as ExcalidrawElementSnapshot[];
+  } catch {
+    return [];
+  }
 }
 
 test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E", () => {

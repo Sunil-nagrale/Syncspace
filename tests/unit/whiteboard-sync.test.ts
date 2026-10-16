@@ -13,6 +13,10 @@ import {
   hasPropertyDiff,
   SPATIAL_PROPERTIES,
   STYLE_PROPERTIES,
+  applyRestoredElementsToStorageMap,
+  applyMutatedElementsToStorageMap,
+  updateWhiteboardDomAttributes,
+  StorageUnavailableError,
 } from "@/components/whiteboards/reconciliation";
 
 function makeRectangle(
@@ -495,6 +499,123 @@ describe("Whiteboard Concurrency & Reconciliation Suite (Phase 6B)", () => {
       expect(parsed).toEqual(sceneData);
       expect(parsed.elements[0].groupIds).toEqual(["group-alpha", "group-beta"]);
       expect(parsed.elements[0].strokeColor).toBe("#4f46e5");
+    });
+  });
+
+  describe("8. Storage Mutation Error Handling & Failure Paths", () => {
+    it("throws StorageUnavailableError when storage elements map is null or undefined on restore", () => {
+      expect(() => {
+        applyRestoredElementsToStorageMap(null, [makeRectangle("el-1")]);
+      }).toThrow(StorageUnavailableError);
+
+      expect(() => {
+        applyRestoredElementsToStorageMap(undefined, [makeRectangle("el-1")]);
+      }).toThrow("Liveblocks storage is not available to propagate restored scene to connected peers");
+    });
+
+    it("throws StorageUnavailableError when storage elements map is null or undefined on mutation", () => {
+      expect(() => {
+        applyMutatedElementsToStorageMap(null, [makeRectangle("el-1")]);
+      }).toThrow(StorageUnavailableError);
+
+      expect(() => {
+        applyMutatedElementsToStorageMap(undefined, [makeRectangle("el-1")]);
+      }).toThrow("Liveblocks storage is not available for real-time element mutation");
+    });
+
+    it("propagates unexpected storage errors without swallowing them", () => {
+      const mockStorageMap = {
+        entries: () => [],
+        set: () => {
+          throw new Error("Liveblocks WebSocket network disconnect");
+        },
+      };
+
+      expect(() => {
+        applyRestoredElementsToStorageMap(mockStorageMap as any, [makeRectangle("el-1")]);
+      }).toThrow("Liveblocks WebSocket network disconnect");
+
+      expect(() => {
+        applyMutatedElementsToStorageMap(mockStorageMap as any, [makeRectangle("el-1")]);
+      }).toThrow("Liveblocks WebSocket network disconnect");
+    });
+
+    it("successfully applies restored elements and marks non-restored elements as deleted", () => {
+      const storageState = new Map<string, any>([
+        ["el-existing", makeRectangle("el-existing", { version: 1, isDeleted: false })],
+        ["el-displaced", makeEllipse("el-displaced", { version: 2, isDeleted: false })],
+      ]);
+
+      const mockLiveMap = {
+        entries: () => storageState.entries(),
+        set: (key: string, val: any) => storageState.set(key, val),
+      };
+
+      const restoredElements = [
+        makeRectangle("el-existing", { version: 3, width: 300 }),
+        makeRectangle("el-brand-new", { version: 1, height: 150 }),
+      ];
+
+      applyRestoredElementsToStorageMap(mockLiveMap as any, restoredElements);
+
+      // el-displaced should be marked deleted with incremented version
+      const displaced = storageState.get("el-displaced");
+      expect(displaced.isDeleted).toBe(true);
+      expect(displaced.version).toBe(3);
+
+      // el-existing should be updated with restored data and sanitized
+      const existing = storageState.get("el-existing");
+      expect(existing.isDeleted).toBe(false);
+      expect(existing.width).toBe(300);
+
+      // el-brand-new should be inserted
+      const brandNew = storageState.get("el-brand-new");
+      expect(brandNew.isDeleted).toBe(false);
+      expect(brandNew.height).toBe(150);
+    });
+
+    it("accurately computes and sets DOM data attributes on canvas container", () => {
+      const mockDiv = {
+        attributes: new Map<string, string>(),
+        setAttribute(k: string, v: string) {
+          this.attributes.set(k, v);
+        },
+        getAttribute(k: string) {
+          return this.attributes.get(k) ?? null;
+        },
+      };
+
+      const elements = [
+        makeRectangle("rect-1", { x: 50, y: 60, width: 100, height: 80, isDeleted: false }),
+        makeEllipse("ellipse-2", { x: 200, y: 150, width: 90, height: 90, isDeleted: true }),
+        makeRectangle("rect-3", { x: 300, y: 400, width: 150, height: 120, isDeleted: false }),
+      ];
+
+      updateWhiteboardDomAttributes(mockDiv as unknown as HTMLElement, elements);
+
+      expect(mockDiv.getAttribute("data-active-count")).toBe("2");
+      expect(mockDiv.getAttribute("data-active-element-ids")).toBe("rect-1,rect-3");
+
+      const activeJson = JSON.parse(mockDiv.getAttribute("data-active-elements")!);
+      expect(activeJson).toHaveLength(2);
+      expect(activeJson[0]).toEqual({
+        id: "rect-1",
+        type: "rectangle",
+        x: 50,
+        y: 60,
+        width: 100,
+        height: 80,
+      });
+      expect(activeJson[1]).toEqual({
+        id: "rect-3",
+        type: "rectangle",
+        x: 300,
+        y: 400,
+        width: 150,
+        height: 120,
+      });
+
+      expect(mockDiv.getAttribute("data-scene-signature")).toContain("2:rect-1_rectangle_50_60;rect-3_rectangle_300_400");
     });
   });
 });

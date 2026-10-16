@@ -293,3 +293,108 @@ export function reconcileScene(
     return 0;
   });
 }
+
+/**
+ * Thrown when Liveblocks room storage is null, undefined, or disconnected
+ * during an active mutation or restore attempt.
+ */
+export class StorageUnavailableError extends Error {
+  constructor(message = "Liveblocks storage is unavailable or not yet loaded") {
+    super(message);
+    this.name = "StorageUnavailableError";
+  }
+}
+
+/**
+ * Applies a restored scene snapshot to a Liveblocks LiveMap elements storage container.
+ * Displaces elements not present in the restored scene by tombstoning them with an incremented version.
+ * Restored elements are sanitized and written to storage.
+ */
+export function applyRestoredElementsToStorageMap<T = unknown>(
+  elementsMap: {
+    entries: () => Iterable<[string, T]>;
+    set: (key: string, value: T) => void;
+  } | null | undefined,
+  restoredElements: readonly ExcalidrawElement[]
+): void {
+  if (!elementsMap) {
+    throw new StorageUnavailableError(
+      "Liveblocks storage is not available to propagate restored scene to connected peers"
+    );
+  }
+
+  const restoredIds = new Set(restoredElements.map((e) => e.id));
+
+  // Displace elements not in the restored scene by marking them deleted
+  for (const [key, val] of elementsMap.entries()) {
+    if (!restoredIds.has(key)) {
+      const elem = val as ExcalidrawElement;
+      elementsMap.set(key, {
+        ...elem,
+        isDeleted: true,
+        version: (elem.version ?? 0) + 1,
+      } as unknown as T);
+    }
+  }
+
+  // Add/overwrite all elements from restored scene with sanitized data
+  for (const el of restoredElements) {
+    const sanitized = sanitizeWhiteboardElement(el) as unknown as T;
+    elementsMap.set(el.id, sanitized);
+  }
+}
+
+/**
+ * Updates mutated elements in a Liveblocks LiveMap elements storage container.
+ */
+export function applyMutatedElementsToStorageMap<T = unknown>(
+  elementsMap: {
+    set: (key: string, value: T) => void;
+  } | null | undefined,
+  elementsToSync: readonly ExcalidrawElement[]
+): void {
+  if (!elementsMap) {
+    throw new StorageUnavailableError(
+      "Liveblocks storage is not available for real-time element mutation"
+    );
+  }
+
+  for (const el of elementsToSync) {
+    const sanitized = sanitizeWhiteboardElement(el) as unknown as T;
+    elementsMap.set(el.id, sanitized);
+  }
+}
+
+/**
+ * Updates DOM data attributes on the whiteboard canvas container for read-only test observability.
+ * Provides element count, active IDs, and deterministic element summaries without exposing internal APIs on window.
+ */
+export function updateWhiteboardDomAttributes(
+  container: HTMLElement | null,
+  elements: readonly ExcalidrawElement[]
+): void {
+  if (!container) return;
+  const active = elements.filter((el) => !el.isDeleted);
+  container.setAttribute("data-active-count", String(active.length));
+  container.setAttribute(
+    "data-active-element-ids",
+    active.map((el) => el.id).join(",")
+  );
+  container.setAttribute(
+    "data-active-elements",
+    JSON.stringify(
+      active.map((el) => ({
+        id: el.id,
+        type: el.type,
+        x: Math.round(el.x),
+        y: Math.round(el.y),
+        width: Math.round(el.width),
+        height: Math.round(el.height),
+      }))
+    )
+  );
+  container.setAttribute(
+    "data-scene-signature",
+    `${active.length}:${active.map((el) => `${el.id}_${el.type}_${Math.round(el.x)}_${Math.round(el.y)}`).join(";")}`
+  );
+}

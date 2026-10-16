@@ -64,6 +64,7 @@ import type {
   WhiteboardPermissionItem,
 } from "./types";
 import { useWhiteboardSync } from "./use-whiteboard-sync";
+import { updateWhiteboardDomAttributes } from "./reconciliation";
 
 // Client-only dynamic import of the Excalidraw inner canvas to prevent SSR window reference errors
 const ExcalidrawCanvasInner = dynamic(
@@ -209,7 +210,15 @@ function StandaloneWhiteboardWorkspace(props: CollaborativeWhiteboardProps) {
       selfCollaborator={selfCollaborator}
       onCanvasChange={() => {}}
       onPointerUpdate={() => {}}
-      onRestoreScene={(elements) => excalidrawAPIRef.current?.updateScene({ elements })}
+      onRestoreScene={(elements) => {
+        excalidrawAPIRef.current?.updateScene({ elements });
+        if (typeof document !== "undefined") {
+          const container = document.querySelector<HTMLElement>(
+            '[data-testid="excalidraw-canvas-container"]'
+          );
+          updateWhiteboardDomAttributes(container, elements);
+        }
+      }}
       saveState={saveState}
       lastSavedText={lastSavedText}
     />
@@ -286,7 +295,9 @@ function WhiteboardWorkspaceLayout({
   const handleRestoreWhiteboard = useCallback(
     async (snapshotData: Record<string, unknown>, newTitle?: string) => {
       const elements = (snapshotData.elements as readonly ExcalidrawElement[]) || [];
-      onRestoreScene?.(elements);
+      if (onRestoreScene) {
+        await Promise.resolve(onRestoreScene(elements));
+      }
 
       if (newTitle && newTitle.trim()) {
         setTitle(newTitle.trim());
@@ -302,10 +313,8 @@ function WhiteboardWorkspaceLayout({
       if (params.get("thread")) {
         setIsCommentsOpen(true);
       }
-      (window as unknown as { __GET_SCENE_ELEMENTS__?: () => readonly ExcalidrawElement[] }).__GET_SCENE_ELEMENTS__ = () =>
-        excalidrawAPIRef.current?.getSceneElementsIncludingDeleted() || [];
     }
-  }, [excalidrawAPIRef]);
+  }, []);
 
   // Share & Permissions modal state
   const [shareOpen, setShareOpen] = useState(false);

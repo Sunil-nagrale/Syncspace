@@ -19,7 +19,13 @@ import type {
   CollaborativeWhiteboardProps,
   CollaboratorInfo,
 } from "./types";
-import { reconcileScene, sanitizeWhiteboardElement } from "./reconciliation";
+import {
+  reconcileScene,
+  applyRestoredElementsToStorageMap,
+  applyMutatedElementsToStorageMap,
+  updateWhiteboardDomAttributes,
+  StorageUnavailableError,
+} from "./reconciliation";
 
 function extractElementsArray(elementsContainer: unknown): ExcalidrawElement[] {
   if (!elementsContainer) return [];
@@ -133,12 +139,7 @@ export function useWhiteboardSync(
   const updateStorageElements = useMutation(
     ({ storage }, elementsToSync: readonly ExcalidrawElement[]) => {
       const liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
-      if (!liveElements) return;
-
-      for (const el of elementsToSync) {
-        const sanitized = sanitizeWhiteboardElement(el);
-        liveElements.set(el.id, sanitized as unknown as JsonObject);
-      }
+      applyMutatedElementsToStorageMap(liveElements, elementsToSync);
     },
     []
   );
@@ -147,27 +148,7 @@ export function useWhiteboardSync(
   const restoreStorageElements = useMutation(
     ({ storage }, elementsToRestore: readonly ExcalidrawElement[]) => {
       const liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
-      if (!liveElements) return;
-
-      const restoredIds = new Set(elementsToRestore.map((e) => e.id));
-
-      // Displace elements not in the restored scene by marking them deleted
-      for (const [key, val] of liveElements.entries()) {
-        if (!restoredIds.has(key)) {
-          const elem = val as unknown as ExcalidrawElement;
-          liveElements.set(key, {
-            ...elem,
-            isDeleted: true,
-            version: (elem.version ?? 0) + 1,
-          } as unknown as JsonObject);
-        }
-      }
-
-      // Add/overwrite all elements from restored scene
-      for (const el of elementsToRestore) {
-        const sanitized = sanitizeWhiteboardElement(el);
-        liveElements.set(el.id, sanitized as unknown as JsonObject);
-      }
+      applyRestoredElementsToStorageMap(liveElements, elementsToRestore);
     },
     []
   );
@@ -175,7 +156,9 @@ export function useWhiteboardSync(
   const restoreScene = useCallback(
     (restoredElements: readonly ExcalidrawElement[]) => {
       const api = excalidrawAPIRef.current;
-      if (!api) return;
+      if (!api) {
+        throw new Error("Whiteboard canvas is not initialized");
+      }
 
       isApplyingRemoteUpdateRef.current = true;
       api.updateScene({ elements: restoredElements });
@@ -184,17 +167,39 @@ export function useWhiteboardSync(
         lastSyncedVersionsRef.current.set(el.id, el.version);
       }
 
-      if (canEdit && elementsMap !== null && elementsMap !== undefined) {
-        try {
-          restoreStorageElements(restoredElements);
-        } catch {
-          // Liveblocks storage not yet loaded
-        }
+      if (typeof document !== "undefined") {
+        const container = document.querySelector<HTMLElement>(
+          '[data-testid="excalidraw-canvas-container"]'
+        );
+        updateWhiteboardDomAttributes(container, restoredElements);
       }
 
       setTimeout(() => {
         isApplyingRemoteUpdateRef.current = false;
       }, 50);
+
+      if (canEdit) {
+        if (!elementsMap) {
+          setSaveState("error");
+          setLastSavedText("Live sync unavailable");
+          throw new StorageUnavailableError(
+            "Liveblocks storage is not available to propagate restored scene to connected peers"
+          );
+        }
+
+        try {
+          restoreStorageElements(restoredElements);
+        } catch (err: unknown) {
+          setSaveState("error");
+          setLastSavedText("Live sync failed");
+          console.error("Failed to propagate restored scene to Liveblocks storage:", err);
+          throw new Error(
+            `Failed to propagate restored scene to Liveblocks storage: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      }
 
       setSaveState("saved");
       setLastSavedText("Just restored");
@@ -219,6 +224,13 @@ export function useWhiteboardSync(
           lastSyncedVersionsRef.current.set(el.id, el.version);
         }
 
+        if (typeof document !== "undefined") {
+          const container = document.querySelector<HTMLElement>(
+            '[data-testid="excalidraw-canvas-container"]'
+          );
+          updateWhiteboardDomAttributes(container, storageElements);
+        }
+
         setTimeout(() => {
           isApplyingRemoteUpdateRef.current = false;
         }, 50);
@@ -235,12 +247,19 @@ export function useWhiteboardSync(
           lastSyncedVersionsRef.current.set(el.id, el.version);
         }
 
+        if (typeof document !== "undefined") {
+          const container = document.querySelector<HTMLElement>(
+            '[data-testid="excalidraw-canvas-container"]'
+          );
+          updateWhiteboardDomAttributes(container, initialEls);
+        }
+
         // If authorized editor, seed Liveblocks storage with the initial snapshot
         if (canEdit && elementsMap !== null && elementsMap !== undefined) {
           try {
             updateStorageElements(initialEls);
-          } catch {
-            // Liveblocks storage not yet loaded
+          } catch (err: unknown) {
+            console.warn("Liveblocks storage unavailable during initial snapshot seeding:", err);
           }
         }
 
@@ -296,6 +315,13 @@ export function useWhiteboardSync(
       lastSyncedVersionsRef.current.set(el.id, el.version);
     }
 
+    if (typeof document !== "undefined") {
+      const container = document.querySelector<HTMLElement>(
+        '[data-testid="excalidraw-canvas-container"]'
+      );
+      updateWhiteboardDomAttributes(container, reconciled);
+    }
+
     setTimeout(() => {
       isApplyingRemoteUpdateRef.current = false;
     }, 50);
@@ -324,9 +350,12 @@ export function useWhiteboardSync(
         if (elementsMap !== null && elementsMap !== undefined) {
           try {
             updateStorageElements(mutatedElements);
-          } catch {
-            // Liveblocks storage not yet loaded
+          } catch (err: unknown) {
+            console.error("Failed to update Liveblocks storage elements:", err);
+            setSaveState("error");
           }
+        } else {
+          console.warn("Liveblocks storage not available for real-time element mutation");
         }
         schedulePostgresSnapshot(elements);
       }
