@@ -154,43 +154,102 @@ export class AuthorizationService {
       "VIEWER"
     );
 
-    // Workspace OWNER or ADMIN always have full privileges
-    if (membership.role === "OWNER" || membership.role === "ADMIN") {
-      return {
-        artifact,
-        membership,
-        effectiveRole: membership.role,
-      };
-    }
-
-    // Check specific artifact override
+    // Check specific artifact override first (granular overrides constrain or elevate workspace defaults)
     const override = artifact.permissions[0];
     let effectiveRole: "OWNER" | "ADMIN" | "EDITOR" | "VIEWER" = membership.role;
 
     if (override) {
       if (override.role === "NONE") {
-        throw new AuthorizationError("Access to this artifact has been explicitly revoked.");
-      } else if (override.role === "EDITOR") {
-        effectiveRole = "EDITOR";
+        throw new AuthorizationError(
+          "Access to this artifact has been explicitly revoked.",
+          403
+        );
       } else if (override.role === "VIEWER") {
         effectiveRole = "VIEWER";
+      } else if (override.role === "EDITOR") {
+        if (membership.role === "VIEWER") {
+          effectiveRole = "EDITOR";
+        }
       }
     }
 
     // Check action against effective role
     if (requiredAction === "ADMIN") {
-      // Only workspace OWNER or ADMIN can administer artifacts
-      throw new AuthorizationError("Admin privileges required for this action.");
+      if (
+        (membership.role !== "OWNER" && membership.role !== "ADMIN") ||
+        effectiveRole === "VIEWER"
+      ) {
+        throw new AuthorizationError(
+          "Admin privileges required for this action.",
+          403
+        );
+      }
     }
 
     if (requiredAction === "EDIT" && effectiveRole === "VIEWER") {
-      throw new AuthorizationError("Edit permission required for this artifact.");
+      throw new AuthorizationError(
+        "Edit permission required for this artifact.",
+        403
+      );
     }
 
     return {
       artifact,
       membership,
       effectiveRole,
+    };
+  }
+
+  /**
+   * Resolves effective access for a Liveblocks collaboration room by its persisted liveblocksRoomId.
+   */
+  static async requireArtifactRoomAccess(
+    userId: string,
+    roomId: string,
+    expectedType?: "DOCUMENT" | "WHITEBOARD"
+  ): Promise<{
+    artifact: Artifact;
+    membership: WorkspaceMember;
+    effectiveRole: "OWNER" | "ADMIN" | "EDITOR" | "VIEWER";
+    canWrite: boolean;
+  }> {
+    if (!userId) {
+      throw new AuthorizationError("Authentication required.", 401);
+    }
+
+    const normalizedRoomId = typeof roomId === "string" ? roomId.trim() : "";
+    if (!normalizedRoomId) {
+      throw new AuthorizationError("Valid room ID is required.", 400);
+    }
+
+    const roomArtifact = await prisma.artifact.findUnique({
+      where: { liveblocksRoomId: normalizedRoomId },
+      select: {
+        id: true,
+        type: true,
+        isArchived: true,
+      },
+    });
+
+    if (!roomArtifact || roomArtifact.isArchived) {
+      throw new NotFoundError("Collaboration room not found.");
+    }
+
+    if (expectedType && roomArtifact.type !== expectedType) {
+      throw new AuthorizationError(
+        `Room does not belong to a ${expectedType} artifact.`,
+        403
+      );
+    }
+
+    const { artifact, membership, effectiveRole } =
+      await this.requireArtifactAccess(userId, roomArtifact.id, "VIEW");
+
+    return {
+      artifact,
+      membership,
+      effectiveRole,
+      canWrite: effectiveRole !== "VIEWER",
     };
   }
 }

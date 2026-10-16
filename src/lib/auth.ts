@@ -26,6 +26,20 @@ export const auth = betterAuth({
       },
     },
   },
+  rateLimit: {
+    window: 60,
+    max: 100,
+    customRules: {
+      "/sign-up/email": {
+        window: 60,
+        max: 50,
+      },
+      "/sign-in/email": {
+        window: 60,
+        max: 50,
+      },
+    },
+  },
 });
 
 export type Session = typeof auth.$Infer.Session.session;

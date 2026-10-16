@@ -46,16 +46,17 @@ Unit tests execute quickly in an isolated Node.js environment without network or
 
 ## 4. Integration Testing (Vitest + PostgreSQL)
 
-Integration tests exercise full route handlers, application service boundaries, and database queries against a dedicated PostgreSQL test container.
+Integration tests (`tests/integration/database.test.ts` and `tests/integration/liveblocks-auth.test.ts`) exercise full route handlers, application service boundaries, and database queries against the live `syncspace-postgres` PostgreSQL 16 Docker container.
 
 ### Target Areas
 - **Authentication Flows (`/api/auth/*`)**:
-  - Password hashing and verification, invalid credentials rejection, session cookie issuance.
-- **Liveblocks Server Authorization (`/api/liveblocks-auth`)**:
-  - Attempting to authorize room `art_123` as an unauthorized user returns HTTP 403.
-  - Authorizing as an `EDITOR` grants `["room:write"]`.
-  - Authorizing as a `VIEWER` grants `["room:read", "room:presence:write"]`.
-  - Passing malformed or unauthenticated requests returns HTTP 401/400.
+  - Password hashing and verification, invalid credentials rejection, session cookie issuance, and logout invalidation.
+- **Liveblocks Server Authorization (`/api/liveblocks-auth` & `LiveblocksAuthService`)**:
+  - Attempting to authorize a room as an unauthenticated user returns HTTP 401; unauthorized outsider returns HTTP 403/404.
+  - Authorizing as an `OWNER`, `ADMIN`, or `EDITOR` grants `["*:write"]` (`FULL_ACCESS`).
+  - Authorizing as a `VIEWER` grants `["*:read"]` (`READ_ACCESS`).
+  - Per-artifact `ArtifactPermission` overrides (`EDITOR`, `VIEWER`, `NONE`) constrain or elevate workspace roles (including constraining an `ADMIN` to `VIEWER` or revoking an `EDITOR` with `NONE`).
+  - Missing or placeholder `LIVEBLOCKS_SECRET_KEY` raises `LiveblocksConfigurationError` (HTTP 503).
 - **Attachment Presigning (`/api/attachments/presign-upload`)**:
   - Files over 25MB are rejected with HTTP 413.
   - Disallowed MIME types (e.g. `.exe`) return HTTP 415.

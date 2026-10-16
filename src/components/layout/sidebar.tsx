@@ -368,7 +368,8 @@ export function Sidebar({
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 className="text-xs text-destructive focus:text-destructive cursor-pointer flex items-center gap-2"
-                onClick={async () => {
+                onSelect={async (e) => {
+                  e.preventDefault();
                   try {
                     await authClient.signOut();
                   } finally {

@@ -24,6 +24,7 @@ export interface UpdateArtifactInput {
   isPinned?: boolean;
   isArchived?: boolean;
   projectId?: string | null;
+  contentSnapshot?: Record<string, unknown>;
 }
 
 export class ArtifactService {
@@ -143,24 +144,77 @@ export class ArtifactService {
   }
 
   /**
-   * Get a single artifact with permission check
+   * Get a single artifact with permission check and relational metadata
    */
   static async getArtifactById(
     userId: string,
     artifactId: string
-  ): Promise<{ artifact: Artifact; effectiveRole: string }> {
-    const { artifact, effectiveRole } =
+  ) {
+    const { effectiveRole } =
       await AuthorizationService.requireArtifactAccess(
         userId,
         artifactId,
         "VIEW"
       );
 
+    const artifact = await prisma.artifact.findUnique({
+      where: { id: artifactId },
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            image: true,
+            color: true,
+          },
+        },
+        updatedBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            image: true,
+            color: true,
+          },
+        },
+        project: {
+          select: {
+            id: true,
+            name: true,
+            color: true,
+            icon: true,
+          },
+        },
+        workspace: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+          },
+        },
+        versions: {
+          orderBy: { versionNumber: "desc" },
+          take: 1,
+          select: {
+            id: true,
+            versionNumber: true,
+            snapshotData: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    if (!artifact || artifact.isArchived) {
+      throw new AuthorizationError("Artifact not found.", 404);
+    }
+
     return { artifact, effectiveRole };
   }
 
   /**
-   * Update artifact metadata
+   * Update artifact metadata and optional content snapshot
    */
   static async updateArtifact(
     userId: string,
@@ -192,7 +246,9 @@ export class ArtifactService {
     const updated = await prisma.artifact.update({
       where: { id: artifactId },
       data: {
-        ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+        ...(input.title !== undefined && input.title.trim().length > 0
+          ? { title: input.title.trim() }
+          : {}),
         ...(input.description !== undefined ? { description: input.description.trim() } : {}),
         ...(input.icon !== undefined ? { icon: input.icon } : {}),
         ...(input.coverImageUrl !== undefined ? { coverImageUrl: input.coverImageUrl } : {}),
@@ -203,6 +259,37 @@ export class ArtifactService {
       },
     });
 
+    if (input.contentSnapshot && typeof input.contentSnapshot === "object") {
+      const safeSnapshot = JSON.parse(JSON.stringify(input.contentSnapshot));
+      await prisma.artifactVersion.upsert({
+        where: {
+          artifactId_versionNumber: {
+            artifactId,
+            versionNumber: 1,
+          },
+        },
+        create: {
+          artifactId,
+          versionNumber: 1,
+          title: updated.title,
+          snapshotData: safeSnapshot,
+          changeSummary: "Latest collaborative document state",
+          createdById: userId,
+        },
+        update: {
+          title: updated.title,
+          snapshotData: safeSnapshot,
+          createdById: userId,
+        },
+      });
+    }
+
+    const metadataSummary: Record<string, unknown> = {};
+    if (input.title !== undefined) metadataSummary.title = updated.title;
+    if (input.isPinned !== undefined) metadataSummary.isPinned = updated.isPinned;
+    if (input.isArchived !== undefined) metadataSummary.isArchived = updated.isArchived;
+    if (input.contentSnapshot !== undefined) metadataSummary.hasSnapshot = true;
+
     await prisma.activityEvent.create({
       data: {
         workspaceId: artifact.workspaceId,
@@ -210,7 +297,7 @@ export class ArtifactService {
         action: "artifact.updated",
         entityType: "artifact",
         entityId: artifactId,
-        metadata: JSON.parse(JSON.stringify(input)),
+        metadata: JSON.parse(JSON.stringify(metadataSummary)),
       },
     });
 
@@ -225,5 +312,78 @@ export class ArtifactService {
     artifactId: string
   ): Promise<Artifact> {
     return this.updateArtifact(userId, artifactId, { isArchived: true });
+  }
+
+  /**
+   * List explicit per-user permission overrides on an artifact
+   */
+  static async getArtifactPermissions(userId: string, artifactId: string) {
+    await AuthorizationService.requireArtifactAccess(userId, artifactId, "VIEW");
+
+    return prisma.artifactPermission.findMany({
+      where: { artifactId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            image: true,
+            color: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+  }
+
+  /**
+   * Set or remove an explicit per-user permission override on an artifact (requires ADMIN access)
+   */
+  static async setArtifactPermission(
+    actorUserId: string,
+    artifactId: string,
+    targetUserId: string,
+    role: "EDITOR" | "VIEWER" | "NONE" | "INHERIT"
+  ) {
+    const { artifact } = await AuthorizationService.requireArtifactAccess(
+      actorUserId,
+      artifactId,
+      "ADMIN"
+    );
+
+    // Ensure target user belongs to the workspace
+    await AuthorizationService.requireWorkspaceAccess(
+      targetUserId,
+      artifact.workspaceId,
+      "VIEWER"
+    );
+
+    if (role === "INHERIT") {
+      await prisma.artifactPermission.deleteMany({
+        where: {
+          artifactId,
+          userId: targetUserId,
+        },
+      });
+      return null;
+    }
+
+    return prisma.artifactPermission.upsert({
+      where: {
+        artifactId_userId: {
+          artifactId,
+          userId: targetUserId,
+        },
+      },
+      create: {
+        artifactId,
+        userId: targetUserId,
+        role,
+      },
+      update: {
+        role,
+      },
+    });
   }
 }

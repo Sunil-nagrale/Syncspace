@@ -70,54 +70,59 @@ graph LR
 
 ---
 
-## Phase C: Authorization, Invitations & Collaboration-Room Access
+## Phase C: Authorization, Invitations & Collaboration-Room Access (Implemented in Phase 4B & Phase 5)
 
 - **Prerequisites**: Phase B complete.
 - **Deliverables**:
-  - Role-based access control (RBAC) helpers (`resolveEffectivePermission`).
-  - Workspace member management and role promotion/demotion.
-  - Cryptographic invitation generation, email link acceptance flow, and invite expiry.
-  - Liveblocks server-side authorization endpoint (`/api/liveblocks-auth`) enforcing artifact permissions.
-- **Expected Files / Modules**:
-  - `lib/permissions.ts`, `services/invitation.service.ts`, `services/member.service.ts`
-  - `app/api/liveblocks-auth/route.ts`, `app/(app)/[workspaceSlug]/settings/members/page.tsx`
-  - `app/invite/[token]/page.tsx`
+  - Role-based access control (RBAC) helpers (`AuthorizationService.requireWorkspaceAccess`, `requireProjectAccess`, `requireArtifactAccess`, `requireArtifactRoomAccess`).
+  - Per-artifact permission overrides (`ArtifactPermission` with `EDITOR`, `VIEWER`, `NONE` precedence over workspace roles).
+  - Liveblocks server-side authorization endpoint (`POST /api/liveblocks-auth` and `LiveblocksAuthService`).
+- **Implemented Files / Modules**:
+  - `src/services/authorization.service.ts`, `src/services/liveblocks-auth.service.ts`, `src/services/artifact.service.ts`
+  - `src/app/api/liveblocks-auth/route.ts`, `src/app/api/artifacts/[artifactId]/permissions/route.ts`
 - **Acceptance Criteria**:
-  - Supplying an unauthorized room ID to `/api/liveblocks-auth` returns HTTP 403.
-  - Editor role receives `room:write`; Viewer role receives `room:read`.
-  - Revoking membership prevents subsequent room token renewals.
+  - Supplying an unauthorized or revoked room ID to `/api/liveblocks-auth` returns HTTP 403.
+  - Effective `OWNER`/`ADMIN`/`EDITOR` role receives `["*:write"]`; effective `VIEWER` role receives `["*:read"]`.
 - **Automated Tests**:
-  - Unit tests for `resolveEffectivePermission` edge cases.
-  - Route tests for `/api/liveblocks-auth` with mock sessions.
+  - `tests/unit/authorization.test.ts` and `tests/integration/liveblocks-auth.test.ts`.
 - **External Dependencies**: Liveblocks secret key (`LIVEBLOCKS_SECRET_KEY`).
-- **Definition of Done**: Room tokens are securely minted strictly upon PostgreSQL authorization validation.
 
 ---
 
-## Phase D: Tiptap Documents with Genuine Real-Time Editing
+## Phase D: Tiptap Documents with Genuine Real-Time Editing (Implemented in Phase 5)
 
 - **Prerequisites**: Phase C complete.
 - **Deliverables**:
-  - Rich-text document editor powered by Tiptap v2 and `@liveblocks/react-tiptap`.
-  - Slash command menu (`/` trigger) and floating format toolbar.
-  - Real-time multiplayer synchronization via Yjs.
-  - Live collaborator presence and cursor overlays with assigned user colors.
-  - Read-only enforcement for `VIEWER` roles.
-  - Automatic snapshot persistence to PostgreSQL `ArtifactVersion`.
-- **Expected Files / Modules**:
-  - `features/documents/components/document-editor.tsx`
-  - `features/documents/components/floating-menu.tsx`, `features/documents/components/slash-command.tsx`
-  - `features/documents/extensions/*`, `features/documents/hooks/use-document-sync.ts`
-  - `app/(app)/[workspaceSlug]/docs/[artifactId]/page.tsx`
+  - Rich-text document editor powered by Tiptap v3 (`@tiptap/react@3.32.0`), `yjs@13.6.29`, and `@liveblocks/react-tiptap@3.24.3`.
+  - Slash command menu (`/` trigger), formatting toolbar, safe link popover (`http:`, `https:`, `mailto:`), resizable tables, task lists, and dynamic Document Outline.
+  - Real-time multiplayer synchronization via Yjs CRDTs (`StarterKit.configure({ undoRedo: false })`).
+  - Live collaborator presence avatars and cursor carets with assigned user colors.
+  - Read-only enforcement (`editable: false`) for `VIEWER` roles and constrained artifact overrides.
+  - Automatic debounced snapshot persistence to PostgreSQL `ArtifactVersion`.
+- **Implemented Files / Modules**:
+  - `src/components/documents/collaborative-editor.tsx`
+  - `src/components/documents/editor-extensions.ts`
+  - `src/components/documents/documents-directory.tsx`
+  - `src/app/app/documents/[documentId]/page.tsx`, `src/app/app/documents/page.tsx`
 - **Acceptance Criteria**:
-  - Multiple browsers typing concurrently converge without lost keystrokes.
+  - Rich-text editing, title updates, slash commands, tables, outline, and snapshots persist in PostgreSQL.
   - Viewer role cannot edit or trigger slash commands.
-  - Refreshing the browser reloads the exact latest collaborative document state.
-- **Automated Tests**:
-  - Unit tests for document serialization and slash command filtering.
-  - Playwright multi-context test with two concurrent editors typing in parallel.
-- **External Dependencies**: Liveblocks public and secret keys.
-- **Definition of Done**: Real-time collaborative document editing fully functional and verified across concurrent sessions.
+  - External Liveblocks cloud multi-user WebSocket sync activates automatically when a non-placeholder `LIVEBLOCKS_SECRET_KEY` (`sk_...`) is configured in `.env`.
+- **Phase 5B Verified Status (Liveblocks Cloud Real-Time Collaboration)**:
+  - **Live WebSocket Synchronization**: User A and User B concurrently connect to the Liveblocks room via WebSocket without page reload. User A types -> User B observes updates live in real-time. User B replies -> User A observes updates live.
+  - **Conflict-Free Concurrent Edits**: Rapid interleaved updates from multiple users merge deterministically via Yjs CRDTs without loss or overwrites.
+  - **Live Presence & Indicators**: Online collaborator avatars display active peers in `[data-testid="collaborator-avatars"]` with deterministic user presence colors.
+  - **Snapshot & Reload Persistence**: Document updates persist across full browser reloads and save to PostgreSQL `ArtifactVersion` via debounced snapshots.
+  - **Strict Security & RBAC**: `VIEWER` members are enforced read-only in the live room (`contenteditable="false"`, disabled toolbar, API mutations blocked 403). Unauthorized users (outsiders not belonging to the workspace) are completely rejected from minting Liveblocks tokens (`/api/liveblocks-auth` 403) and denied document access.
+  - **Secret Key Hygiene**: `LIVEBLOCKS_SECRET_KEY` is loaded strictly on the server, excluded from Git via `.gitignore`, never exposed to the client bundle or browser, and never logged.
+- **Automated Verification**:
+  - `npm.cmd run test:integration` (2 files, 5 passed)
+  - `npm.cmd run test` (6 files, 33 passed)
+  - `npm.cmd run lint` (0 warnings, 0 errors)
+  - `npx.cmd tsc --noEmit` (0 errors)
+  - `npm.cmd run build` (18/18 routes compiled)
+  - `npx.cmd playwright test` (11/11 passed across UI shell, PostgreSQL auth/workspaces, and collaborative documents)
+
 
 ---
 
@@ -147,6 +152,23 @@ graph LR
   - Playwright test simulating two users creating shapes simultaneously.
 - **External Dependencies**: Liveblocks keys.
 - **Definition of Done**: Multi-user whiteboard editing completely operational with genuine CRDT/reconciliation sync.
+- **Phase 6 Verified Status (Excalidraw & Liveblocks Collaborative Whiteboards)**:
+  - **Live WebSocket Element Synchronization**: Users concurrently connect to Liveblocks room storage (`LiveMap<string, ExcalidrawElement>`). User A draws shapes (rectangles) -> User B observes shapes live without page reload. User B connects arrows -> User A observes updates live.
+  - **Granular LWW Reconciliation & Tombstones**: `reconcileElements` merges local canvas state with remote element updates without whole-canvas replacement. Deletions apply tombstone dominance (`isDeleted: true`, incremented version) preventing element resurrection.
+  - **Feedback Loop Elimination**: Bidirectional synchronization prevents infinite loops via `isApplyingRemoteUpdateRef` suppression and element version tracking (`lastSyncedVersionsRef`).
+  - **Ephemeral Presence & Collaborator Avatars**: Active remote peers are tracked via Liveblocks presence (`useMyPresence`, `useOthers`) and displayed as live collaborator badges with custom presence colors.
+  - **Dual-Tier Persistence**: Active rooms persist in Liveblocks Cloud storage; debounced background saves (1500ms) persist non-deleted scene snapshots (`{ elements: ... }`) into PostgreSQL `ArtifactVersion` records.
+  - **Role-Based Access Control & Security**: `VIEWER` users are enforced read-only (`viewModeEnabled={true}` in Excalidraw, `initialStorage` mutation suppression, `canEdit: false`, read-only UI banner). Non-workspace members (outsiders) receive 403 Forbidden on `/api/liveblocks-auth` and 404 Not Found on direct route access.
+  - **Multi-Format Export**: Client-only dynamic export helpers support PNG, SVG, and JSON scene downloads without SSR window errors.
+- **Automated Verification**:
+  - `npm.cmd run test:integration` (2 files, 5 passed)
+  - `npm.cmd run test` (7 files, 42 passed)
+  - `npm.cmd run lint` (0 errors)
+  - `npx.cmd tsc --noEmit` (0 errors)
+  - `npm.cmd run build` (18/18 routes compiled, client chunks optimized)
+  - `npx.cmd playwright test tests/e2e/collaborative-whiteboards.spec.ts` (2/2 passed)
+  - `npx.cmd playwright test tests/e2e/collaborative-documents.spec.ts` (2/2 passed - Phase 5B regression verified clean)
+  - `npx.cmd playwright test tests/e2e/auth-and-workspaces.spec.ts` (2/2 passed - Phase 4B regression verified clean)
 
 ---
 

@@ -146,3 +146,81 @@ The application needs efficient data fetching, caching, and state synchronizatio
 - **Real-Time Collaborative State**: Liveblocks React hooks (`useStorage`, `useMutation`, `useOthers`, `useMyPresence`, `useThreads`).
 - **Local Ephemeral UI State**: React `useState`, `useReducer`, and Radix UI primitives.
 - Avoid heavyweight global state libraries (Redux, MobX) which duplicate server and room storage states.
+
+---
+
+## ADR 8: Tiptap v3 + `@liveblocks/react-tiptap` v3 Package Alignment (Phase 5)
+
+### Context
+Phase 5 implements the collaborative rich-text document editor on React 19 and Next.js 15.5.28. We needed to align Liveblocks and Tiptap package versions to avoid peer-dependency conflicts, duplicate ProseMirror instances, or conflicting undo history stacks.
+
+### Decision
+- Standardize on **Liveblocks `3.24.3`** (`@liveblocks/client`, `@liveblocks/react`, `@liveblocks/react-ui`, `@liveblocks/react-tiptap`, `@liveblocks/node`), **Tiptap `3.32.0`** (`@tiptap/core`, `@tiptap/pm`, `@tiptap/react`, `@tiptap/starter-kit`, `@tiptap/extension-placeholder`, `@tiptap/extension-table`, `@tiptap/extension-task-list`, `@tiptap/extension-task-item`, `@tiptap/suggestion`), and **`yjs@^13.6.29`**.
+- Configure `StarterKit.configure({ undoRedo: false })` whenever `useLiveblocksExtension` is active, because Tiptap v3 consolidates `Link`, `Underline`, and `UndoRedo` into `StarterKit`, and `@liveblocks/react-tiptap` provides its own collaborative Yjs `yUndoPlugin`.
+- Enforce safe link protocols (`http:`, `https:`, `mailto:`) via `isSafeLinkUrl` in both Tiptap's `Link` extension (`isAllowedUri`) and the toolbar link popover.
+
+---
+
+## ADR 9: Whiteboard Collaborative Synchronization & Tombstone Reconciliation Engine (Phase 6 & 6B)
+
+### Context
+Phase 6 delivers collaborative diagramming via `@excalidraw/excalidraw@0.18.1` and Liveblocks v3 on Next.js 15.5.28 and React 19. A naive synchronization approach (such as broadcasting full scene JSON arrays on `onChange`) causes devastating race conditions, infinite feedback loops, and element resurrection bugs. We require a rigorous, application-controlled synchronization architecture that provides deterministic convergence, conflict-free concurrent editing, and resilient deletion semantics.
+
+### Decision
+Implement an authoritative two-way synchronization adapter (`useWhiteboardSync`) and reconciliation engine (`reconciliation.ts`) combining **Liveblocks Room Storage (`LiveMap<string, JsonObject>`)**, **property-aware 3-way element reconciliation**, and **tombstoned element lifecycle management**.
+
+#### 1. Data Representation & Propagation
+- **Liveblocks Room Storage**: The root contains a `LiveMap<string, JsonObject>` named `elements`, where each key is `element.id`.
+- **Granular Updates**: When an element is created, moved, resized, or restyled, only that specific element is pushed to the `LiveMap` via `liveElements.set(element.id, sanitizedElement)`.
+- **Sanitization**: Local client transient state (such as `isSelected`) is stripped via `sanitizeWhiteboardElement` before publishing to storage.
+- **High-Frequency Throttling**: Interactive drag and freehand draw gestures are batched and throttled through Liveblocks mutations, streaming coalesced updates to remote peers without degrading 60fps local rendering.
+
+#### 2. Conflict-Resolution Policy (Proven by Unit & E2E Tests)
+- **Concurrent Element Creation**:
+  - Independent creations on distinct elements (User A creates Element 1 while User B creates Element 2) mutate different keys in `LiveMap`.
+  - Both elements survive regardless of arrival order (`[A, B]` or `[B, A]`), producing identical converged scenes.
+- **Concurrent Edits on the Same Element**:
+  - Properties are partitioned into independent categories:
+    - *Spatial*: `x`, `y`, `width`, `height`, `angle`.
+    - *Styling*: `strokeColor`, `backgroundColor`, `fillStyle`, `strokeWidth`, `strokeStyle`, `roughness`, `opacity`, `roundness`.
+    - *Text*: `text`, `fontSize`, `fontFamily`, `textAlign`, `verticalAlign`, `lineHeight`.
+  - **Disjoint Safe Merging**: If User A modifies spatial properties (moves the element) and User B modifies styling properties (changes stroke/background color), the reconciliation engine (`reconcileElementPair`) safely merges both updates into a unified element:
+    $$\text{merged} = \{ \dots\text{styleUpdate}, \text{x}: \text{spatialUpdate.x}, \text{y}: \text{spatialUpdate.y}, \text{version}: \max(v_A, v_B) + 1 \}$$
+  - **Conflicting Same-Property Edits**: If both peers modify the same property (e.g. both peers drag the element to different positions, or both change stroke color):
+    1. The update with the strictly higher `version` wins.
+    2. If versions are identical, the tie is broken deterministically by selecting the update with the **lowest `versionNonce`** (matching Excalidraw's canonical tie-breaking rule: `local.version === remote.version && local.versionNonce < remote.versionNonce`).
+  - **Active Interaction Protection**: If a local user is actively interacting with an element (e.g. actively resizing or text-editing, verified via `localAppState.resizingElement` or `localAppState.editingTextElement`), the local edit is preserved during the gesture to prevent jarring layout jumps.
+
+#### 3. Deletion Semantics & Tombstone Lifecycle
+- **Tombstone Strategy**: Deletion is modeled explicitly as a tombstone: `isDeleted: true` with `version: element.version + 1` and a new `versionNonce`.
+- **Resurrection Prevention**:
+  - If an element is tombstoned, any delayed, out-of-order, or in-flight active update with $\text{version} \le \text{tombstone.version}$ is discarded.
+  - If an active update and a deletion have the exact same version, the deletion wins.
+  - An element can only be un-deleted if an explicit user restoration action is performed with a strictly higher version than the tombstone.
+- **Canvas Filtering**: Excalidraw's canvas renders only non-deleted elements (`isDeleted !== true`).
+- **Snapshot Hygiene**: Background snapshot persistence filters out tombstones before saving to PostgreSQL `ArtifactVersion` to prevent storage bloat.
+
+#### 4. Idempotence & Out-of-Order Updates
+- **Replay Idempotence**: Replaying an already applied update produces the exact same element state without version inflation.
+- **Out-of-Order Delivery**: Late-arriving older packets ($v_{\text{incoming}} < v_{\text{current}}$) are discarded without mutating current scene state or affecting unrelated elements.
+- **Unrelated Element Safety**: Mutating an element never modifies or drops other existing elements in the scene.
+
+#### 5. Reconnection and Late-Joining Behavior
+- **Collaborator Disconnection**: When a peer disconnects (or navigates away), Liveblocks presence drops the collaborator avatar from remote headers.
+- **Mid-Flight Offline Edits**: Edits made by remaining peers while a collaborator is away persist in Liveblocks Cloud storage and PostgreSQL snapshots.
+- **Reconnection & Convergence**: When the disconnected peer returns, `reconcileScene` updates stale local elements to the newer remote versions, incorporates newly created remote elements, and preserves any local offline creations.
+- **Late-Joining & Page Refresh**: A collaborator opening the board after peers have made changes (or after a full browser refresh) hydrates the complete, converged scene from storage.
+
+#### 6. Dual-Tier Persistence
+- **Tier 1 (Authoritative Real-Time)**: Liveblocks Cloud room storage persists the active `LiveMap` during editing sessions. Reconnecting users or users opening the board receive the full, converged element map directly from Liveblocks Cloud.
+- **Tier 2 (PostgreSQL Snapshots)**: A debounced snapshot saver (1500ms after last local edit) serializes the non-deleted scene to PostgreSQL `ArtifactVersion` (`snapshotData: { elements }`). This provides historical snapshots, backup durability, and exportable offline state.
+
+#### 7. Role-Based Access Control
+- Whiteboard rooms enforce explicit artifact-level access via `AuthorizationService.requireArtifactRoomAccess` and `/api/liveblocks-auth` with `expectedType: "WHITEBOARD"`.
+- `VIEWER` users receive `READ_ACCESS` (`["*:read"]`) token scopes, `viewModeEnabled={true}` in `<Excalidraw />`, and `initialStorage` mutation bypass. All outgoing mutations are disabled, and direct API write attempts are rejected with `403 Forbidden`.
+- Unauthorized users (non-workspace members) are completely denied token issuance (403) and receive `Not Found` UI fallbacks.
+
+#### 8. Remaining Limitations
+- **Atomic Freehand Strokes**: Freehand drawing (`freedraw`) and polygon points are treated as atomic point arrays; concurrent edits to the same freehand stroke do not interleave individual points.
+- **Local Undo/Redo**: Excalidraw's undo/redo history is local to the client. Undoing an action produces a new forward mutation with an incremented version rather than rewinding shared cloud state.
+- **Liveblocks Connection Limits**: Cloud room concurrency is constrained by the provisioned Liveblocks plan tier.

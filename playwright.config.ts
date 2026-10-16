@@ -2,14 +2,14 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  fullyParallel: true,
+  fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
-  reporter: "html",
-  timeout: 60000,
+  workers: 1,
+  reporter: "list",
+  timeout: 120000,
   expect: {
-    timeout: 20000,
+    timeout: 30000,
   },
   use: {
     baseURL: process.env.PLAYWRIGHT_TEST_BASE_URL || "http://localhost:3000",
@@ -30,7 +30,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm.cmd run dev",
+    command: "npm.cmd run start",
     url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000,

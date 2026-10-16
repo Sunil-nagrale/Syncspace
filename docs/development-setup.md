@@ -51,13 +51,21 @@ cd d:\syncspace
 npm.cmd install
 ```
 
-### Step 2: Configure Environment Variables
+### Step 2: Configure Environment Variables & PostgreSQL
 Copy the template configuration file:
 ```powershell
-cp .env.example .env.local
+cp .env.example .env
 ```
 
-Edit `.env.local` to configure placeholder values. For Phase 3 (Foundation and UI Shell), external service credentials (Liveblocks, PostgreSQL, S3) are not strictly required to preview the shell.
+1. **PostgreSQL Database (`DATABASE_URL`)**:
+   Ensure the `syncspace-postgres` Docker container is running on port `5432` and migrations are applied:
+   ```powershell
+   npx.cmd prisma migrate status
+   ```
+2. **Liveblocks Real-Time Collaboration (`LIVEBLOCKS_SECRET_KEY`)**:
+   - Retrieve your server secret key (`sk_dev_...` or `sk_prod_...`) from [https://liveblocks.io/dashboard/apikeys](https://liveblocks.io/dashboard/apikeys).
+   - Set `LIVEBLOCKS_SECRET_KEY=sk_dev_...` in `.env` (server-only; never expose in `NEXT_PUBLIC_*`).
+   - If `LIVEBLOCKS_SECRET_KEY` is left as the placeholder `sk_dev_placeholder_liveblocks_secret_key`, `/api/liveblocks-auth` returns `503 Service Unavailable` after completing PostgreSQL RBAC checks, and the document editor operates in local PostgreSQL snapshot mode with an explicit configuration banner.
 
 ### Step 3: Run the Development Server
 ```powershell

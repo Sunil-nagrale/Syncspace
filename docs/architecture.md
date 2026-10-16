@@ -109,25 +109,25 @@ Located in `@/services` to decouple HTTP transport from business logic:
 
 ### 3.1 Document Collaboration (Tiptap + Yjs + Liveblocks)
 
-The document collaboration pipeline uses the official `@liveblocks/react-tiptap` integration:
+The document collaboration pipeline uses the official `@liveblocks/react-tiptap@3.24.3`, `@liveblocks/react@3.24.3`, `@liveblocks/node@3.24.3`, `@tiptap/react@3.32.0`, and `yjs@13.6.29` integration:
 
 1. **State Ownership**:
-   - The authoritative real-time state of the document text resides in the **Liveblocks Cloud Room Storage** as a **Yjs Document (`Y.Doc`)**.
-   - PostgreSQL does *not* receive keystroke-level updates. PostgreSQL stores metadata (title, updated timestamp, author) and periodic point-in-time snapshot blobs (`ArtifactVersion`).
-2. **Editor Initialization**:
-   - The client enters a Liveblocks room `<RoomProvider id={`artifact:${artifactId}`} initialStorage={{...}}>`.
-   - The `<Editor />` component invokes `useLiveblocksExtension()` which binds to the active room's Yjs provider under the hood.
-   - Tiptap is initialized with `StarterKit.configure({ history: false })` (local undo/redo is disabled).
-   - If the remote Yjs document is empty, `initialContent` can hydrate the document without re-injecting duplicate paragraphs.
+   - The authoritative real-time state of the document text resides in **Liveblocks Room Storage** as a **Yjs Document (`Y.Doc`)** keyed by `Artifact.liveblocksRoomId` (`art_<24-char-hex>`).
+   - PostgreSQL stores canonical relational metadata (`Artifact.title`, `updatedAt`, `updatedById`, `ArtifactPermission` overrides) and debounced point-in-time JSON snapshots (`ArtifactVersion`).
+2. **Editor Initialization (`src/components/documents/collaborative-editor.tsx` & `editor-extensions.ts`)**:
+   - The client wraps the document view in `<LiveblocksProvider authEndpoint="/api/liveblocks-auth">` and `<RoomProvider id={liveblocksRoomId}>`.
+   - `useLiveblocksExtension({ comments: false, mentions: false, initialContent })` binds Tiptap to the room's Yjs `Y.Doc` and awareness provider.
+   - Tiptap v3 is initialized via `StarterKit.configure({ undoRedo: false, heading: { levels: [1, 2, 3] }, link: { isAllowedUri: isSafeLinkUrl } })`, `Table.configure({ resizable: true })`, `TableRow`, `TableHeader`, `TableCell`, `TaskList`, `TaskItem`, and `Placeholder`.
+   - Disabling `undoRedo` in `StarterKit` delegates undo/redo (`Ctrl+Z` / `Ctrl+Y`) to the Liveblocks/Yjs `yUndoPlugin` so local undos only revert the local user's operations.
 3. **Live Cursors & Presence**:
-   - Managed automatically by `@liveblocks/react-tiptap` through Yjs awareness protocol mapped to Liveblocks presence.
-   - Collaborators' names and assigned colors are passed during server token authorization in `userInfo`.
-4. **Viewer-Only Enforcement**:
-   - If a user's role is `VIEWER`, the Tiptap editor is initialized with `editable: false`.
-   - On the server, `session.allow(`artifact:${artifactId}`, ["room:read"])` is granted without `room:write`.
-5. **Reconnection & Offline Recovery**:
-   - Yjs tracks state vectors. If network connectivity drops, local edits accumulate in the client's Yjs memory.
-   - Upon reconnection to Liveblocks WebSockets, Yjs state vectors exchange diffs and converge deterministically.
+   - Managed by `@liveblocks/react-tiptap` (`CollaborationCaret`) and Liveblocks presence (`useSelf()`, `useOthers()`).
+   - Collaborator names, emails, roles, and deterministic hex colors are embedded into the signed room session token by `LiveblocksAuthService` (`src/services/liveblocks-auth.service.ts`).
+4. **Viewer-Only & Per-Artifact Override Enforcement**:
+   - `AuthorizationService.requireArtifactAccess` and `requireArtifactRoomAccess` evaluate explicit `ArtifactPermission` overrides (`NONE`, `VIEWER`, `EDITOR`) before falling back to the user's `WorkspaceMember.role`.
+   - If the user's effective role is `VIEWER`, the Tiptap editor enforces `editable: false`, formatting controls and slash commands are disabled, and `/api/liveblocks-auth` issues `session.allow(roomId, session.READ_ACCESS)` (`["*:read"]`).
+5. **Reconnection, Offline & Missing Credential Handling**:
+   - Room connection state is monitored via `useStatus()`, `useIsEditorReady()`, and `useErrorListener()`.
+   - If `LIVEBLOCKS_SECRET_KEY` is missing or set to a placeholder in `.env`, `/api/liveblocks-auth` returns `503 Service Unavailable` (`LIVEBLOCKS_SECRET_KEY_NOT_CONFIGURED`) after completing PostgreSQL RBAC checks, and the UI surfaces an explicit configuration notice while keeping local Tiptap editing and PostgreSQL snapshot persistence active.
 
 ---
 

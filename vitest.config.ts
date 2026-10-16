@@ -8,6 +8,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./tests/unit/setup.ts"],
-    include: ["tests/unit/**/*.test.{ts,tsx}"],
+    include: ["tests/**/*.test.{ts,tsx}"],
+    server: {
+      deps: {
+        inline: ["@excalidraw/excalidraw"],
+      },
+    },
   },
 });

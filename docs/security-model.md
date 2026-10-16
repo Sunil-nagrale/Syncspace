@@ -63,23 +63,23 @@ if (!artifact) {
 
 ## 4. Liveblocks Server-Side Authorization
 
-Liveblocks room tokens are minted dynamically through `/api/liveblocks-auth`. 
+Liveblocks room tokens are minted dynamically through `POST /api/liveblocks-auth` (`src/app/api/liveblocks-auth/route.ts` and `src/services/liveblocks-auth.service.ts`). Public key authentication is never used for private workspace rooms.
 
 ### 4.1 Token Issuance Workflow
-1. The client Liveblocks SDK attempts to join a room (e.g., `room: "art_clw12345"`).
-2. The client fires an authenticated `POST` request to `/api/liveblocks-auth` with the target `room`.
-3. The server validates the user's active session cookie.
-4. The server extracts the `artifactId` from the room name and calls `resolveEffectivePermission(userId, artifactId)`.
-5. If the user has:
-   - `OWNER`, `ADMIN`, or `EDITOR`: The session receives write permissions:
+1. The client `<LiveblocksProvider authEndpoint="/api/liveblocks-auth">` requests a room token when entering `<RoomProvider id={liveblocksRoomId}>`.
+2. The server authenticates the request using `getServerSession()` (Better Auth session cookie) and loads the user record from PostgreSQL.
+3. The server validates the requested `room` string and looks up the non-archived `Artifact` by `Artifact.liveblocksRoomId` via `AuthorizationService.requireArtifactRoomAccess(userId, roomId, "DOCUMENT")`.
+4. Effective permission resolution (`AuthorizationService.requireArtifactAccess`) verifies `WorkspaceMember` membership first, then checks for an explicit per-artifact `ArtifactPermission` override (`NONE`, `VIEWER`, `EDITOR`) which constrains or elevates the workspace role (including `OWNER` and `ADMIN`):
+   - Effective role `OWNER`, `ADMIN`, or `EDITOR` (when permitted by artifact policy): receives full write access:
      ```typescript
-     session.allow(room, ["room:write"]);
+     session.allow(artifact.liveblocksRoomId, session.FULL_ACCESS); // ["*:write"]
      ```
-   - `VIEWER`: The session receives read-only permissions:
+   - Effective role `VIEWER`: receives strictly read-only access:
      ```typescript
-     session.allow(room, ["room:read", "room:presence:write"]);
+     session.allow(artifact.liveblocksRoomId, session.READ_ACCESS); // ["*:read"]
      ```
-   - `DENIED`: The endpoint immediately returns an HTTP 403 Forbidden without calling `session.authorize()`.
+   - Unauthenticated (`401`), malformed room (`400`), unauthorized / revoked (`NONE`) / wrong artifact type (`403`): rejected before any Liveblocks token is minted.
+   - Missing or placeholder `LIVEBLOCKS_SECRET_KEY`: returns `503 Service Unavailable` (`LIVEBLOCKS_SECRET_KEY_NOT_CONFIGURED`).
 
 ```mermaid
 sequenceDiagram
@@ -89,24 +89,24 @@ sequenceDiagram
     participant DB as PostgreSQL (Prisma)
     participant LBCloud as Liveblocks Cloud
 
-    Client->>AuthRoute: POST /api/liveblocks-auth (room: "art_xyz") + Session Cookie
-    AuthRoute->>AuthRoute: Validate Session Cookie
-    AuthRoute->>DB: resolveEffectivePermission(userId, "xyz")
-    alt User has No Access
-        DB-->>AuthRoute: DENIED
-        AuthRoute-->>Client: 403 Forbidden
-    else User is Viewer
+    Client->>AuthRoute: POST /api/liveblocks-auth (room: "art_...") + Session Cookie
+    AuthRoute->>AuthRoute: Validate Better Auth Session
+    AuthRoute->>DB: Lookup Artifact by liveblocksRoomId & resolve effective role + ArtifactPermission override
+    alt Unauthorized / Revoked (NONE) / Nonexistent Room
+        DB-->>AuthRoute: Denied
+        AuthRoute-->>Client: 401 / 403 Forbidden
+    else Effective Role is VIEWER
         DB-->>AuthRoute: VIEWER
-        AuthRoute->>LBCloud: prepareSession(userId).allow("art_xyz", ["room:read", "room:presence:write"]).authorize()
-        LBCloud-->>AuthRoute: Signed JWT Access Token
+        AuthRoute->>LBCloud: prepareSession(userId, userInfo).allow(roomId, READ_ACCESS).authorize()
+        LBCloud-->>AuthRoute: Signed Room Access Token (Read-Only)
         AuthRoute-->>Client: 200 OK (Token Body)
-    else User is Editor / Admin / Owner
-        DB-->>AuthRoute: EDITOR
-        AuthRoute->>LBCloud: prepareSession(userId).allow("art_xyz", ["room:write"]).authorize()
-        LBCloud-->>AuthRoute: Signed JWT Access Token
+    else Effective Role is OWNER / ADMIN / EDITOR
+        DB-->>AuthRoute: EDITOR / ADMIN / OWNER
+        AuthRoute->>LBCloud: prepareSession(userId, userInfo).allow(roomId, FULL_ACCESS).authorize()
+        LBCloud-->>AuthRoute: Signed Room Access Token (Read/Write)
         AuthRoute-->>Client: 200 OK (Token Body)
     end
-    Client->>LBCloud: WSS Connect with Signed JWT Token
+    Client->>LBCloud: WSS Connect with Signed Room Token
 ```
 
 ---

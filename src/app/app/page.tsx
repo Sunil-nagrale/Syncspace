@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import {
   FileText,
   PenTool,
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { getServerSession } from "@/lib/session";
+import { AuthorizationService } from "@/services/authorization.service";
 import { WorkspaceService } from "@/services/workspace.service";
 import { ProjectService } from "@/services/project.service";
 import { ArtifactService } from "@/services/artifact.service";
@@ -21,9 +23,32 @@ import { CreateWorkspaceDialog } from "@/components/workspaces/create-workspace-
 import { CreateProjectDialog } from "@/components/projects/create-project-dialog";
 import { CreateArtifactDialog } from "@/components/artifacts/create-artifact-dialog";
 
-export default async function WorkspaceDashboard() {
+interface WorkspaceDashboardProps {
+  searchParams?: Promise<{ workspaceId?: string }>;
+}
+
+export default async function WorkspaceDashboard({
+  searchParams,
+}: WorkspaceDashboardProps) {
   const session = await getServerSession();
   const userId = session?.user?.id;
+  const resolvedParams = searchParams ? await searchParams : undefined;
+  const requestedWorkspaceId = resolvedParams?.workspaceId;
+
+  if (requestedWorkspaceId) {
+    if (!userId) {
+      notFound();
+    }
+    try {
+      await AuthorizationService.requireWorkspaceAccess(
+        userId,
+        requestedWorkspaceId,
+        "VIEWER"
+      );
+    } catch {
+      notFound();
+    }
+  }
 
   let workspaces: Awaited<ReturnType<typeof WorkspaceService.getUserWorkspaces>> = [];
   let activeWorkspace: (typeof workspaces)[0] | null = null;
@@ -41,7 +66,9 @@ export default async function WorkspaceDashboard() {
     try {
       workspaces = await WorkspaceService.getUserWorkspaces(userId);
       if (workspaces.length > 0) {
-        activeWorkspace = workspaces[0];
+        activeWorkspace = requestedWorkspaceId
+          ? workspaces.find((w) => w.id === requestedWorkspaceId) || workspaces[0]
+          : workspaces[0];
 
         // Fetch projects and artifacts in parallel
         const [loadedProjects, loadedArtifacts, loadedActivities] = await Promise.all([
@@ -137,6 +164,8 @@ export default async function WorkspaceDashboard() {
     );
   }
 
+  const canEdit = activeWorkspace.currentUserRole !== "VIEWER";
+
   return (
     <div className="container mx-auto max-w-7xl p-6 sm:p-8 space-y-8">
       {/* Welcome Banner & Quick Actions */}
@@ -157,17 +186,25 @@ export default async function WorkspaceDashboard() {
 
         {/* Quick Create Buttons */}
         <div className="flex flex-wrap items-center gap-2">
-          <CreateArtifactDialog
-            workspaceId={activeWorkspace.id}
-            type="DOCUMENT"
-            projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-          />
-          <CreateArtifactDialog
-            workspaceId={activeWorkspace.id}
-            type="WHITEBOARD"
-            projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-          />
-          <CreateProjectDialog workspaceId={activeWorkspace.id} />
+          {canEdit ? (
+            <>
+              <CreateArtifactDialog
+                workspaceId={activeWorkspace.id}
+                type="DOCUMENT"
+                projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+              />
+              <CreateArtifactDialog
+                workspaceId={activeWorkspace.id}
+                type="WHITEBOARD"
+                projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+              />
+              <CreateProjectDialog workspaceId={activeWorkspace.id} />
+            </>
+          ) : (
+            <Badge variant="secondary" className="text-xs">
+              Read-Only Viewer Access
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -198,18 +235,20 @@ export default async function WorkspaceDashboard() {
                 <p className="text-xs text-muted-foreground max-w-sm mx-auto mb-4">
                   Get started by creating a new document or whiteboard in this workspace.
                 </p>
-                <div className="flex items-center justify-center gap-2">
-                  <CreateArtifactDialog
-                    workspaceId={activeWorkspace.id}
-                    type="DOCUMENT"
-                    projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-                  />
-                  <CreateArtifactDialog
-                    workspaceId={activeWorkspace.id}
-                    type="WHITEBOARD"
-                    projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-                  />
-                </div>
+                {canEdit && (
+                  <div className="flex items-center justify-center gap-2">
+                    <CreateArtifactDialog
+                      workspaceId={activeWorkspace.id}
+                      type="DOCUMENT"
+                      projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+                    />
+                    <CreateArtifactDialog
+                      workspaceId={activeWorkspace.id}
+                      type="WHITEBOARD"
+                      projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+                    />
+                  </div>
+                )}
               </Card>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -276,7 +315,7 @@ export default async function WorkspaceDashboard() {
                 <h2 className="text-base font-semibold text-foreground">Active Projects</h2>
               </div>
               <div className="flex items-center gap-2">
-                <CreateProjectDialog workspaceId={activeWorkspace.id} />
+                {canEdit && <CreateProjectDialog workspaceId={activeWorkspace.id} />}
                 <Link
                   href="/app/projects"
                   className="text-xs text-muted-foreground hover:text-foreground transition"
@@ -291,7 +330,7 @@ export default async function WorkspaceDashboard() {
                 <p className="text-xs text-muted-foreground mb-3">
                   No active projects in this workspace yet.
                 </p>
-                <CreateProjectDialog workspaceId={activeWorkspace.id} />
+                {canEdit && <CreateProjectDialog workspaceId={activeWorkspace.id} />}
               </Card>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
