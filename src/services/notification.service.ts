@@ -240,19 +240,59 @@ export class NotificationService {
   }
 
   /**
-   * Get unread notification count for a user.
+   * Constructs the database filter enforcing active authorization when querying notifications:
+   * 1. Recipient must match the authenticated user.
+   * 2. Recipient must have active workspace membership.
+   * 3. Associated artifact must exist and not be archived.
+   * 4. Recipient must NOT have an explicit NONE permission override on the artifact.
+   * 5. Associated discussion thread must exist.
+   * 6. Associated comment must exist.
+   */
+  static getAccessibleWhere(actorUserId: string): Prisma.NotificationWhereInput {
+    return {
+      recipientId: actorUserId,
+      workspace: {
+        members: {
+          some: {
+            userId: actorUserId,
+          },
+        },
+      },
+      artifact: {
+        isNot: null,
+        is: {
+          isArchived: false,
+          permissions: {
+            none: {
+              userId: actorUserId,
+              role: "NONE",
+            },
+          },
+        },
+      },
+      thread: {
+        isNot: null,
+      },
+      comment: {
+        isNot: null,
+      },
+    };
+  }
+
+  /**
+   * Get unread notification count for an authenticated user, enforcing current authorization.
    */
   static async getUnreadCount(actorUserId: string): Promise<number> {
     return prisma.notification.count({
       where: {
-        recipientId: actorUserId,
+        ...this.getAccessibleWhere(actorUserId),
         readAt: null,
       },
     });
   }
 
   /**
-   * List paginated notifications for the authenticated user.
+   * List paginated notifications for the authenticated user, enforcing current authorization.
    */
   static async listNotifications(params: {
     actorUserId: string;
@@ -264,7 +304,7 @@ export class NotificationService {
     const limit = Math.min(Math.max(params.limit ?? 20, 1), 50);
 
     const whereClause: Prisma.NotificationWhereInput = {
-      recipientId: actorUserId,
+      ...this.getAccessibleWhere(actorUserId),
       ...(filter === "unread" ? { readAt: null } : {}),
     };
 
@@ -331,7 +371,7 @@ export class NotificationService {
   }
 
   /**
-   * Mark a single notification as read, enforcing strict IDOR isolation.
+   * Mark a single notification as read, enforcing strict IDOR isolation and active authorization.
    */
   static async markAsRead(params: {
     actorUserId: string;
@@ -339,8 +379,11 @@ export class NotificationService {
   }): Promise<FormattedNotification> {
     const { actorUserId, notificationId } = params;
 
-    const existing = await prisma.notification.findUnique({
-      where: { id: notificationId },
+    const existing = await prisma.notification.findFirst({
+      where: {
+        id: notificationId,
+        ...this.getAccessibleWhere(actorUserId),
+      },
       include: {
         actor: {
           select: {
@@ -361,7 +404,7 @@ export class NotificationService {
       },
     });
 
-    if (!existing || existing.recipientId !== actorUserId) {
+    if (!existing) {
       throw new NotFoundError("Notification not found.");
     }
 
@@ -424,13 +467,24 @@ export class NotificationService {
   }
 
   /**
-   * Mark all unread notifications for a user as read.
+   * Mark all accessible unread notifications for a user as read.
    */
   static async markAllAsRead(actorUserId: string): Promise<{ count: number }> {
+    const accessibleUnread = await prisma.notification.findMany({
+      where: {
+        ...this.getAccessibleWhere(actorUserId),
+        readAt: null,
+      },
+      select: { id: true },
+    });
+
+    if (accessibleUnread.length === 0) {
+      return { count: 0 };
+    }
+
     const result = await prisma.notification.updateMany({
       where: {
-        recipientId: actorUserId,
-        readAt: null,
+        id: { in: accessibleUnread.map((n) => n.id) },
       },
       data: {
         readAt: new Date(),

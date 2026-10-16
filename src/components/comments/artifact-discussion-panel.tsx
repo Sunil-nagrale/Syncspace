@@ -923,6 +923,28 @@ export function ArtifactDiscussionPanel({
 
         {/* Discussion Content Scroll Area */}
         <ScrollArea className="flex-1 p-4">
+          {/* Missing or deleted thread fallback banner */}
+          {highlightedThreadId && !isLoading && !threads.some((t) => t.id === highlightedThreadId) && (
+            <div
+              className="mb-4 p-2.5 rounded-md bg-muted/60 border border-border text-xs text-muted-foreground flex items-center justify-between gap-2"
+              data-testid="thread-not-found-banner"
+            >
+              <div className="flex items-center gap-1.5">
+                <AlertCircle className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span>The requested discussion thread could not be found or may have been deleted.</span>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                onClick={() => setHighlightedThreadId(null)}
+                aria-label="Dismiss banner"
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          )}
+
           {/* New Thread Composer (at top) */}
           {canComment ? (
             <div className="mb-6 p-3 rounded-lg border border-border bg-card shadow-sm">

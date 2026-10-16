@@ -367,4 +367,213 @@ describe("Phase 8B — @Mentions and In-App Notifications Integration Tests", ()
     const finalUnread = await NotificationService.getUnreadCount(recipient.id);
     expect(finalUnread).toBe(0);
   });
+
+  it("enforces immediate filtering and unread-count reduction when recipient loses workspace membership, and restores access without duplicate notifications", async () => {
+    const { author, recipient, workspace, artifact } =
+      await setupTestEnvironment();
+
+    // 1. Author creates a thread mentioning recipient
+    const thread = await CommentService.createThread({
+      actorUserId: author.id,
+      artifactId: artifact.id,
+      content: `Crucial update for @[${recipient.name}](${recipient.id}) regarding architecture`,
+    });
+
+    // 2. Recipient receives notification and sees it in inbox and unread count
+    let unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(1);
+
+    let inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(1);
+    const originalNotificationId = inbox.notifications[0].id;
+    expect(inbox.notifications[0].metadata?.snippet).toContain("Crucial update");
+    expect(inbox.notifications[0].actor.name).toBe(author.name);
+
+    // 3. Recipient loses workspace membership
+    await prisma.workspaceMember.delete({
+      where: {
+        workspaceId_userId: {
+          workspaceId: workspace.id,
+          userId: recipient.id,
+        },
+      },
+    });
+
+    // 4. Recipient can no longer retrieve protected notification content and unread count drops to 0
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(0);
+
+    inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(0);
+
+    // Attempting to mark as read throws NotFoundError
+    await expect(
+      NotificationService.markAsRead({
+        actorUserId: recipient.id,
+        notificationId: originalNotificationId,
+      })
+    ).rejects.toThrow(NotFoundError);
+
+    // markAllAsRead updates 0 records
+    const markAllWhileRevoked = await NotificationService.markAllAsRead(recipient.id);
+    expect(markAllWhileRevoked.count).toBe(0);
+
+    // 5. Restore workspace membership for recipient
+    await prisma.workspaceMember.create({
+      data: {
+        workspaceId: workspace.id,
+        userId: recipient.id,
+        role: "EDITOR",
+      },
+    });
+
+    // 6. Access is restored: unread count is 1, inbox has original notification, no duplicate rows created
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(1);
+
+    inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(1);
+    expect(inbox.notifications[0].id).toBe(originalNotificationId);
+
+    // Verify row count in database has not duplicated
+    const dbNotifCount = await prisma.notification.count({
+      where: {
+        recipientId: recipient.id,
+        commentId: thread.rootComment!.id,
+      },
+    });
+    expect(dbNotifCount).toBe(1);
+  });
+
+  it("enforces immediate filtering and unread-count reduction when explicit artifact NONE override is applied, and restores access on override removal", async () => {
+    const { author, recipient, artifact } = await setupTestEnvironment();
+
+    // 1. Author mentions recipient
+    await CommentService.createThread({
+      actorUserId: author.id,
+      artifactId: artifact.id,
+      content: `Confidential spec review: @[${recipient.name}](${recipient.id})`,
+    });
+
+    // Recipient sees notification
+    let unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(1);
+
+    let inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(1);
+    const notifId = inbox.notifications[0].id;
+
+    // 2. Apply explicit NONE permission override on artifact for recipient
+    await prisma.artifactPermission.create({
+      data: {
+        artifactId: artifact.id,
+        userId: recipient.id,
+        role: "NONE",
+      },
+    });
+
+    // 3. Immediately filtered: unread count 0, inbox empty, markAsRead rejected
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(0);
+
+    inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(0);
+
+    await expect(
+      NotificationService.markAsRead({
+        actorUserId: recipient.id,
+        notificationId: notifId,
+      })
+    ).rejects.toThrow(NotFoundError);
+
+    // 4. Remove explicit NONE override (restoring workspace-level access)
+    await prisma.artifactPermission.delete({
+      where: {
+        artifactId_userId: {
+          artifactId: artifact.id,
+          userId: recipient.id,
+        },
+      },
+    });
+
+    // 5. Access restored cleanly
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(1);
+
+    inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(1);
+    expect(inbox.notifications[0].id).toBe(notifId);
+  });
+
+  it("filters notifications for archived artifacts and deleted resources without broken navigation or data leakage", async () => {
+    const { author, recipient, artifact } = await setupTestEnvironment();
+
+    // 1. Create two separate threads with mentions
+    const thread1 = await CommentService.createThread({
+      actorUserId: author.id,
+      artifactId: artifact.id,
+      content: `Thread 1: @[${recipient.name}](${recipient.id})`,
+    });
+
+    const thread2 = await CommentService.createThread({
+      actorUserId: author.id,
+      artifactId: artifact.id,
+      content: `Thread 2: @[${recipient.name}](${recipient.id})`,
+    });
+
+    let unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(2);
+
+    // 2. Archive the artifact
+    await prisma.artifact.update({
+      where: { id: artifact.id },
+      data: { isArchived: true },
+    });
+
+    // Both notifications filtered while artifact is archived
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(0);
+
+    let inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(0);
+
+    // Unarchive artifact
+    await prisma.artifact.update({
+      where: { id: artifact.id },
+      data: { isArchived: false },
+    });
+
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(2);
+
+    // 3. Delete thread2 (root comment deletion cascades thread deletion)
+    await CommentService.deleteComment({
+      actorUserId: author.id,
+      commentId: thread2.rootComment!.id,
+    });
+
+    // Unread count and inbox now reflect only thread 1
+    unreadCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(unreadCount).toBe(1);
+
+    inbox = await NotificationService.listNotifications({
+      actorUserId: recipient.id,
+    });
+    expect(inbox.notifications.length).toBe(1);
+    expect(inbox.notifications[0].threadId).toBe(thread1.id);
+  });
 });
