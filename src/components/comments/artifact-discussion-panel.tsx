@@ -46,6 +46,7 @@ import type {
   FormattedComment,
   FormattedThreadEvent,
 } from "@/services/comment.service";
+import type { MentionSuggestionUser } from "@/services/notification.service";
 import { MAX_COMMENT_LENGTH } from "@/lib/validations/comment";
 
 const POPULAR_EMOJIS = ["👍", "❤️", "🎉", "🚀", "👀", "💡"];
@@ -98,6 +99,97 @@ function getInitials(name: string): string {
   );
 }
 
+function renderCommentContent(content: string) {
+  const mentionRegex = /@\[([^\]]+)\]\(([a-zA-Z0-9_-]+)\)/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = mentionRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(content.substring(lastIndex, match.index));
+    }
+    const displayName = match[1];
+    const userId = match[2];
+    parts.push(
+      <span
+        key={`${match.index}-${userId}`}
+        className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold bg-brand-indigo/15 text-brand-indigo border border-brand-indigo/25 mx-0.5 align-baseline"
+        data-mention-user-id={userId}
+      >
+        @{displayName}
+      </span>
+    );
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < content.length) {
+    parts.push(content.substring(lastIndex));
+  }
+
+  return parts;
+}
+
+interface MentionAutocompleteProps {
+  suggestions: MentionSuggestionUser[];
+  selectedIndex: number;
+  onSelect: (user: MentionSuggestionUser) => void;
+  isLoading?: boolean;
+}
+
+function MentionAutocomplete({
+  suggestions,
+  selectedIndex,
+  onSelect,
+  isLoading,
+}: MentionAutocompleteProps) {
+  if (suggestions.length === 0 && !isLoading) return null;
+
+  return (
+    <div
+      className="absolute bottom-full left-0 mb-1 w-60 max-h-48 overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg z-50 animate-in fade-in-50 zoom-in-95"
+      data-testid="mention-autocomplete-dropdown"
+    >
+      <div className="px-2 py-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+        Mention Team Member
+      </div>
+      {isLoading && (
+        <div className="flex items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin text-brand-indigo" />
+          <span>Searching members...</span>
+        </div>
+      )}
+      {suggestions.map((user, idx) => {
+        const isSelected = idx === selectedIndex;
+        return (
+          <button
+            key={user.id}
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onSelect(user);
+            }}
+            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs text-left transition-colors cursor-pointer ${
+              isSelected
+                ? "bg-brand-indigo/15 text-brand-indigo font-medium"
+                : "text-foreground hover:bg-muted"
+            }`}
+            data-testid={`mention-suggestion-${user.id}`}
+          >
+            <div
+              className="h-5 w-5 rounded-full flex items-center justify-center text-[9px] font-semibold text-white shrink-0"
+              style={{ backgroundColor: user.color || "#6366F1" }}
+            >
+              {getInitials(user.name)}
+            </div>
+            <span className="truncate">{user.name}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function ArtifactDiscussionPanel({
   artifactId,
   isOpen,
@@ -143,6 +235,124 @@ export function ArtifactDiscussionPanel({
   // Delete modal state
   const [deleteModalCommentId, setDeleteModalCommentId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Search params for auto-focusing thread on navigation
+  const [highlightedThreadId, setHighlightedThreadId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      setHighlightedThreadId(params.get("thread"));
+    }
+  }, []);
+
+  // Mention autocomplete state
+  const [mentionSuggestions, setMentionSuggestions] = useState<MentionSuggestionUser[]>([]);
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+  const [isMentionLoading, setIsMentionLoading] = useState(false);
+  const [mentionTarget, setMentionTarget] = useState<{
+    field: "newThread" | "reply";
+    threadId?: string;
+    query: string;
+    atIndex: number;
+  } | null>(null);
+
+  const newThreadInputRef = useRef<HTMLTextAreaElement>(null);
+  const replyInputRefs = useRef<Record<string, HTMLInputElement>>({});
+
+  const checkMentionTrigger = useCallback(
+    async (
+      value: string,
+      cursorPos: number,
+      field: "newThread" | "reply",
+      threadId?: string
+    ) => {
+      const textBeforeCursor = value.slice(0, cursorPos);
+      const match = /(?:^|\s)@([a-zA-Z0-9_\s]{0,20})$/.exec(textBeforeCursor);
+
+      if (!match) {
+        setMentionTarget(null);
+        setMentionSuggestions([]);
+        return;
+      }
+
+      const matchStr = match[0];
+      const query = match[1];
+      const atOffset = matchStr.startsWith(" ") ? 1 : 0;
+      const atIndex = match.index + atOffset;
+
+      setMentionTarget({
+        field,
+        threadId,
+        query,
+        atIndex,
+      });
+      setSelectedMentionIndex(0);
+      setIsMentionLoading(true);
+
+      try {
+        const res = await fetch(
+          `/api/artifacts/${artifactId}/mention-suggestions?q=${encodeURIComponent(
+            query.trim()
+          )}`
+        );
+        if (res.ok) {
+          const json = await res.json();
+          setMentionSuggestions(json.data ?? []);
+        } else {
+          setMentionSuggestions([]);
+        }
+      } catch (err) {
+        console.error("Error fetching mention suggestions:", err);
+        setMentionSuggestions([]);
+      } finally {
+        setIsMentionLoading(false);
+      }
+    },
+    [artifactId]
+  );
+
+  const handleSelectMention = useCallback(
+    (user: MentionSuggestionUser) => {
+      if (!mentionTarget) return;
+
+      const { field, threadId, atIndex } = mentionTarget;
+      const mentionText = `@[${user.name}](${user.id}) `;
+
+      if (field === "newThread") {
+        const currentVal = newThreadContent;
+        const before = currentVal.slice(0, atIndex);
+        const after = currentVal.slice(atIndex + 1 + mentionTarget.query.length);
+        const updated = before + mentionText + after;
+        setNewThreadContent(updated);
+        setTimeout(() => {
+          if (newThreadInputRef.current) {
+            newThreadInputRef.current.focus();
+            const newCursor = before.length + mentionText.length;
+            newThreadInputRef.current.setSelectionRange(newCursor, newCursor);
+          }
+        }, 0);
+      } else if (field === "reply" && threadId) {
+        const currentVal = replyInputs[threadId] ?? "";
+        const before = currentVal.slice(0, atIndex);
+        const after = currentVal.slice(atIndex + 1 + mentionTarget.query.length);
+        const updated = before + mentionText + after;
+        setReplyInputs((prev) => ({ ...prev, [threadId]: updated }));
+        setTimeout(() => {
+          const inputEl = replyInputRefs.current[threadId];
+          if (inputEl) {
+            inputEl.focus();
+            const newCursor = before.length + mentionText.length;
+            inputEl.setSelectionRange(newCursor, newCursor);
+          }
+        }, 0);
+      }
+
+      setMentionTarget(null);
+      setMentionSuggestions([]);
+    },
+    [mentionTarget, newThreadContent, replyInputs]
+  );
 
   // Fetch threads from API (with cursor-based pagination)
   const nextThreadCursorRef = useRef<string | null>(null);
@@ -220,6 +430,24 @@ export function ArtifactDiscussionPanel({
       void fetchThreads(true);
     }
   }, [isOpen, fetchThreads]);
+
+  // Auto-scroll to highlighted thread if navigating from a notification (?thread=id)
+  useEffect(() => {
+    if (highlightedThreadId && threads.length > 0) {
+      const targetThread = threads.find((t) => t.id === highlightedThreadId);
+      if (targetThread?.isResolved && activeTab === "open") {
+        setActiveTab("all");
+      }
+      setTimeout(() => {
+        const el = document.querySelector(
+          `[data-testid="thread-card-${highlightedThreadId}"]`
+        );
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }, 150);
+    }
+  }, [highlightedThreadId, threads, activeTab]);
 
   // Handle keyboard shortcuts (Escape to close)
   useEffect(() => {
@@ -702,20 +930,71 @@ export function ArtifactDiscussionPanel({
                 <span>Start a discussion</span>
                 <span className="text-[10px] text-muted-foreground">Ctrl+Enter to post</span>
               </div>
-              <Textarea
-                placeholder="Leave feedback or start a conversation..."
-                value={newThreadContent}
-                onChange={(e) => setNewThreadContent(e.target.value)}
-                onKeyDown={(e) => {
-                  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-                    e.preventDefault();
-                    void handleCreateThread();
-                  }
-                }}
-                className="text-xs min-h-[70px] resize-none mb-2"
-                data-testid="new-thread-textarea"
-                maxLength={MAX_COMMENT_LENGTH}
-              />
+              <div className="relative mb-2">
+                <Textarea
+                  ref={newThreadInputRef}
+                  placeholder="Leave feedback or start a conversation... (type @ to mention team members)"
+                  value={newThreadContent}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    const cursor = e.target.selectionStart ?? val.length;
+                    setNewThreadContent(val);
+                    void checkMentionTrigger(val, cursor, "newThread");
+                  }}
+                  onKeyDown={(e) => {
+                    if (
+                      mentionTarget?.field === "newThread" &&
+                      mentionSuggestions.length > 0
+                    ) {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setSelectedMentionIndex(
+                          (prev) => (prev + 1) % mentionSuggestions.length
+                        );
+                        return;
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setSelectedMentionIndex(
+                          (prev) =>
+                            (prev - 1 + mentionSuggestions.length) %
+                            mentionSuggestions.length
+                        );
+                        return;
+                      }
+                      if (e.key === "Enter" || e.key === "Tab") {
+                        e.preventDefault();
+                        handleSelectMention(
+                          mentionSuggestions[selectedMentionIndex]
+                        );
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        setMentionTarget(null);
+                        setMentionSuggestions([]);
+                        return;
+                      }
+                    }
+
+                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                      e.preventDefault();
+                      void handleCreateThread();
+                    }
+                  }}
+                  className="text-xs min-h-[70px] resize-none"
+                  data-testid="new-thread-textarea"
+                  maxLength={MAX_COMMENT_LENGTH}
+                />
+                {mentionTarget?.field === "newThread" && (
+                  <MentionAutocomplete
+                    suggestions={mentionSuggestions}
+                    selectedIndex={selectedMentionIndex}
+                    onSelect={handleSelectMention}
+                    isLoading={isMentionLoading}
+                  />
+                )}
+              </div>
               {newThreadContent.length > 4000 && (
                 <div className="text-[10px] text-muted-foreground text-right mb-1">
                   {newThreadContent.length} / {MAX_COMMENT_LENGTH}
@@ -1006,7 +1285,7 @@ export function ArtifactDiscussionPanel({
                         ) : (
                           <>
                             <div className="text-xs text-foreground whitespace-pre-wrap leading-relaxed">
-                              {rootComment.content}
+                              {renderCommentContent(rootComment.content)}
                               {rootComment.isEdited && (
                                 <span className="text-[10px] text-muted-foreground ml-1.5 italic">
                                   (edited)
@@ -1220,7 +1499,7 @@ export function ArtifactDiscussionPanel({
                               ) : (
                                 <>
                                   <div className="text-xs text-foreground whitespace-pre-wrap leading-relaxed">
-                                    {reply.content}
+                                    {renderCommentContent(reply.content)}
                                     {reply.isEdited && (
                                       <span className="text-[10px] text-muted-foreground ml-1.5 italic">
                                         (edited)
@@ -1316,26 +1595,80 @@ export function ArtifactDiscussionPanel({
                     {canComment && !thread.isResolved && (
                       <div className="p-2.5 bg-muted/20 border-t border-border/50">
                         <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            placeholder="Write a reply... (Enter to post)"
-                            value={replyInputs[thread.id] ?? ""}
-                            onChange={(e) =>
-                              setReplyInputs((prev) => ({
-                                ...prev,
-                                [thread.id]: e.target.value,
-                              }))
-                            }
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && !e.shiftKey) {
-                                e.preventDefault();
-                                void handleCreateReply(thread.id);
-                              }
-                            }}
-                            className="flex-1 h-7 text-xs px-2.5 rounded-md border border-input bg-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            data-testid={`reply-textarea-${thread.id}`}
-                            maxLength={MAX_COMMENT_LENGTH}
-                          />
+                          <div className="relative flex-1">
+                            <input
+                              ref={(el) => {
+                                if (el) replyInputRefs.current[thread.id] = el;
+                                else delete replyInputRefs.current[thread.id];
+                              }}
+                              type="text"
+                              placeholder="Write a reply... (type @ to mention, Enter to post)"
+                              value={replyInputs[thread.id] ?? ""}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                const cursor = e.target.selectionStart ?? val.length;
+                                setReplyInputs((prev) => ({
+                                  ...prev,
+                                  [thread.id]: val,
+                                }));
+                                void checkMentionTrigger(val, cursor, "reply", thread.id);
+                              }}
+                              onKeyDown={(e) => {
+                                if (
+                                  mentionTarget?.field === "reply" &&
+                                  mentionTarget.threadId === thread.id &&
+                                  mentionSuggestions.length > 0
+                                ) {
+                                  if (e.key === "ArrowDown") {
+                                    e.preventDefault();
+                                    setSelectedMentionIndex(
+                                      (prev) => (prev + 1) % mentionSuggestions.length
+                                    );
+                                    return;
+                                  }
+                                  if (e.key === "ArrowUp") {
+                                    e.preventDefault();
+                                    setSelectedMentionIndex(
+                                      (prev) =>
+                                        (prev - 1 + mentionSuggestions.length) %
+                                        mentionSuggestions.length
+                                    );
+                                    return;
+                                  }
+                                  if (e.key === "Enter" || e.key === "Tab") {
+                                    e.preventDefault();
+                                    handleSelectMention(
+                                      mentionSuggestions[selectedMentionIndex]
+                                    );
+                                    return;
+                                  }
+                                  if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    setMentionTarget(null);
+                                    setMentionSuggestions([]);
+                                    return;
+                                  }
+                                }
+
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  void handleCreateReply(thread.id);
+                                }
+                              }}
+                              className="w-full h-7 text-xs px-2.5 rounded-md border border-input bg-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                              data-testid={`reply-textarea-${thread.id}`}
+                              maxLength={MAX_COMMENT_LENGTH}
+                            />
+                            {mentionTarget?.field === "reply" &&
+                              mentionTarget.threadId === thread.id && (
+                                <MentionAutocomplete
+                                  suggestions={mentionSuggestions}
+                                  selectedIndex={selectedMentionIndex}
+                                  onSelect={handleSelectMention}
+                                  isLoading={isMentionLoading}
+                                />
+                              )}
+                          </div>
                           <Button
                             size="sm"
                             className="h-7 text-xs px-2.5 shrink-0"

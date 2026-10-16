@@ -271,6 +271,15 @@ function WhiteboardWorkspaceLayout({
   const [isCommentsOpen, setIsCommentsOpen] = useState(false);
   const [commentCount, setCommentCount] = useState<number | null>(null);
 
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("thread")) {
+        setIsCommentsOpen(true);
+      }
+    }
+  }, []);
+
   // Share & Permissions modal state
   const [shareOpen, setShareOpen] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);

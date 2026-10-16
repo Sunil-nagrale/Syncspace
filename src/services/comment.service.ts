@@ -13,6 +13,7 @@ import {
   validateAnchorData,
   CommentAnchorType,
 } from "@/lib/validations/comment";
+import { NotificationService } from "./notification.service";
 
 export interface CommentReactionSummary {
   emoji: string;
@@ -497,6 +498,19 @@ export class CommentService {
         },
       });
 
+      // Atomically create mention notifications
+      await NotificationService.createMentionNotifications({
+        tx,
+        commentId: rootComment.id,
+        threadId: newThread.id,
+        artifactId,
+        workspaceId: artifact.workspaceId,
+        actorUserId,
+        content: validated.content,
+        artifactTitle: artifact.title,
+        artifactType: artifact.type,
+      });
+
       return {
         ...newThread,
         createdBy,
@@ -597,6 +611,19 @@ export class CommentService {
         data: { updatedAt: new Date() },
       });
 
+      // Atomically create mention notifications
+      await NotificationService.createMentionNotifications({
+        tx,
+        commentId: created.id,
+        threadId,
+        artifactId: thread.artifactId,
+        workspaceId: thread.workspaceId,
+        actorUserId,
+        content: parseResult.data.content,
+        artifactTitle: thread.artifact.title,
+        artifactType: thread.artifact.type,
+      });
+
       return created;
     });
 
@@ -649,32 +676,50 @@ export class CommentService {
       );
     }
 
-    const updated = await prisma.comment.update({
-      where: { id: commentId },
-      data: {
-        content: parseResult.data.content,
-        isEdited: true,
-      },
-      include: {
-        author: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            color: true,
-          },
+    const updated = await prisma.$transaction(async (tx) => {
+      const commentUpdated = await tx.comment.update({
+        where: { id: commentId },
+        data: {
+          content: parseResult.data.content,
+          isEdited: true,
         },
-        reactions: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
+        include: {
+          author: {
+            select: {
+              id: true,
+              name: true,
+              image: true,
+              color: true,
+            },
+          },
+          reactions: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                },
               },
             },
           },
         },
-      },
+      });
+
+      // Atomically create mention notifications for newly added mentions only
+      await NotificationService.createMentionNotifications({
+        tx,
+        commentId,
+        threadId: comment.threadId,
+        artifactId: comment.thread.artifactId,
+        workspaceId: comment.thread.workspaceId,
+        actorUserId,
+        content: parseResult.data.content,
+        artifactTitle: comment.thread.artifact.title,
+        artifactType: comment.thread.artifact.type,
+        isEdit: true,
+      });
+
+      return commentUpdated;
     });
 
     return this.formatComment(updated, actorUserId);

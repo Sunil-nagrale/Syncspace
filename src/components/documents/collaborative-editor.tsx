@@ -402,6 +402,15 @@ function RichTextDocumentWorkspace({
   const [showOutline, setShowOutline] = useState(true);
   const [showCommentsDrawer, setShowCommentsDrawer] = useState(false);
 
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("thread")) {
+        setShowCommentsDrawer(true);
+      }
+    }
+  }, []);
+
   // Link popover state
   const [linkPopoverOpen, setLinkPopoverOpen] = useState(false);
   const [linkInput, setLinkInput] = useState("");

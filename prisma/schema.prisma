@@ -45,6 +45,8 @@ model User {
   comments            Comment[]           @relation("CommentAuthor")
   commentReactions    CommentReaction[]   @relation("CommentReactionUser")
   commentThreadEvents CommentThreadEvent[] @relation("ThreadEventUser")
+  receivedNotifications Notification[]    @relation("NotificationRecipient")
+  sentNotifications     Notification[]    @relation("NotificationActor")
 
   @@map("user")
 }
@@ -125,6 +127,7 @@ model Workspace {
   activityEvents      ActivityEvent[]
   commentThreads      CommentThread[]
   commentThreadEvents CommentThreadEvent[]
+  notifications       Notification[]
 
   @@index([slug])
   @@map("workspace")
@@ -226,6 +229,7 @@ model Artifact {
   attachments    Attachment[]
   commentThreads CommentThread[]
   commentThreadEvents CommentThreadEvent[]
+  notifications  Notification[]
 
   @@index([workspaceId, projectId, isArchived])
   @@index([workspaceId, type, updatedAt])
@@ -334,6 +338,7 @@ model CommentThread {
 
   comments         Comment[]
   events           CommentThreadEvent[]
+  notifications    Notification[]
 
   @@index([artifactId, isResolved, createdAt])
   @@index([workspaceId])
@@ -353,6 +358,7 @@ model Comment {
   updatedAt        DateTime          @updatedAt
 
   reactions        CommentReaction[]
+  notifications    Notification[]
 
   @@index([threadId, createdAt])
   @@index([authorId])
@@ -397,4 +403,38 @@ model CommentThreadEvent {
   @@index([workspaceId])
   @@index([userId])
   @@map("comment_thread_event")
+}
+
+// =============================================================================
+// Notifications & Mentions
+// =============================================================================
+
+enum NotificationType {
+  COMMENT_MENTION
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String
+  recipient   User             @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actorId     String
+  actor       User             @relation("NotificationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId  String?
+  artifact    Artifact?        @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  threadId    String?
+  thread      CommentThread?   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  commentId   String?
+  comment     Comment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  type        NotificationType @default(COMMENT_MENTION)
+  readAt      DateTime?
+  metadata    Json?
+  createdAt   DateTime         @default(now())
+
+  @@unique([commentId, recipientId, type])
+  @@index([recipientId, readAt, createdAt])
+  @@index([recipientId, createdAt])
+  @@index([workspaceId])
+  @@map("notification")
 }

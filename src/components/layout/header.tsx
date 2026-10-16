@@ -1,11 +1,11 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { Menu, Search, Bell } from "lucide-react";
+import { Menu, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { Breadcrumbs } from "@/components/layout/breadcrumbs";
+import { NotificationsPopover } from "@/components/notifications/notifications-popover";
 
 interface HeaderProps {
   onOpenMobileMenu?: () => void;
@@ -64,21 +64,8 @@ export function Header({
           </kbd>
         </Button>
 
-        {/* Notifications Icon with Unread Indicator */}
-        <Link href="/app/notifications">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="relative h-8 w-8 text-muted-foreground hover:text-foreground"
-            aria-label="Notifications"
-          >
-            <Bell className="h-4 w-4" />
-            <span className="absolute top-1.5 right-1.5 flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-indigo opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-brand-indigo"></span>
-            </span>
-          </Button>
-        </Link>
+        {/* Real-time In-App Notifications */}
+        <NotificationsPopover />
 
         {/* Theme Toggle */}
         <ThemeToggle />
