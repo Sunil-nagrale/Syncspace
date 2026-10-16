@@ -67,6 +67,14 @@ Integration tests (`tests/integration/database.test.ts`, `tests/integration/live
   - Files over 25MB are rejected with HTTP 413.
   - Disallowed MIME types (e.g. `.exe`) return HTTP 415.
   - Viewer role requesting upload URL is rejected with HTTP 403.
+- **Artifact Comments, Discussions & Reactions (`CommentService` & `/api/artifacts/[id]/comments/*`)**:
+  - Thread creation, replies, and ordering by timestamp against live PostgreSQL.
+  - Author-only editing restrictions with `isEdited` flag tracking.
+  - Cascading deletion: deleting root comment purges thread, replies, and reactions.
+  - Moderator deletion: workspace `OWNER` and `ADMIN` can delete comments.
+  - Reaction toggle: unique constraint idempotence preventing duplicate emoji reactions.
+  - Thread resolution lifecycle: mark resolved/reopened with resolving user audit log.
+  - Strict IDOR defense: non-members receive 404; explicit `NONE` overrides receive 403.
 - **Workspace Member Management Transactions**:
   - Member removal immediately blocks subsequent tenant access within the same transaction.
 
@@ -132,6 +140,7 @@ test("concurrent document editing converges deterministically", async ({ browser
    - Playwright restores network via `page.setOffline(false)`.
    - Both clients sync and converge to the updated text.
 5. **Persistence After Refresh**: Reloading the page reloads the exact latest Yjs and Excalidraw content from room storage without state regression.
+6. **Artifact Discussions & Reactions**: Multi-user thread creation, replies, reaction toggling, and resolve/reopen lifecycle across collaborative documents and whiteboards, with unauthenticated (401) and cross-workspace outsider (404) security rejection.
 
 ---
 

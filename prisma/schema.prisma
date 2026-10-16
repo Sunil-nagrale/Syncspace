@@ -40,6 +40,10 @@ model User {
   attachmentsUploaded Attachment[]        @relation("AttachmentUploadedBy")
   activityEvents      ActivityEvent[]     @relation("ActivityUser")
   invitationsSent     Invitation[]        @relation("InvitationSender")
+  createdThreads      CommentThread[]     @relation("ThreadCreatedBy")
+  resolvedThreads     CommentThread[]     @relation("ThreadResolvedBy")
+  comments            Comment[]           @relation("CommentAuthor")
+  commentReactions    CommentReaction[]   @relation("CommentReactionUser")
 
   @@map("user")
 }
@@ -118,6 +122,7 @@ model Workspace {
   artifacts      Artifact[]
   attachments    Attachment[]
   activityEvents ActivityEvent[]
+  commentThreads CommentThread[]
 
   @@index([slug])
   @@map("workspace")
@@ -217,6 +222,7 @@ model Artifact {
   permissions ArtifactPermission[]
   versions    ArtifactVersion[]
   attachments Attachment[]
+  commentThreads CommentThread[]
 
   @@index([workspaceId, projectId, isArchived])
   @@index([workspaceId, type, updatedAt])
@@ -300,4 +306,66 @@ model ActivityEvent {
   @@index([workspaceId, createdAt])
   @@index([userId])
   @@map("activity_event")
+}
+
+// =============================================================================
+// Artifact Discussions, Comment Threads & Reactions
+// =============================================================================
+
+model CommentThread {
+  id               String            @id @default(cuid())
+  workspaceId      String
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId       String
+  artifact         Artifact          @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  createdById      String
+  createdBy        User              @relation("ThreadCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  isResolved       Boolean           @default(false)
+  resolvedById     String?
+  resolvedBy       User?             @relation("ThreadResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt       DateTime?
+  anchorType       String?           @default("GENERAL")
+  anchorData       Json?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  comments         Comment[]
+
+  @@index([artifactId, isResolved])
+  @@index([workspaceId])
+  @@index([createdById])
+  @@map("comment_thread")
+}
+
+model Comment {
+  id               String            @id @default(cuid())
+  threadId         String
+  thread           CommentThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  authorId         String
+  author           User              @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  content          String
+  isEdited         Boolean           @default(false)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  reactions        CommentReaction[]
+
+  @@index([threadId, createdAt])
+  @@index([authorId])
+  @@map("comment")
+}
+
+model CommentReaction {
+  id               String            @id @default(cuid())
+  commentId        String
+  comment          Comment           @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User              @relation("CommentReactionUser", fields: [userId], references: [id], onDelete: Cascade)
+  emoji            String
+  createdAt        DateTime          @default(now())
+
+  @@unique([commentId, userId, emoji])
+  @@index([commentId])
+  @@index([userId])
+  @@map("comment_reaction")
 }

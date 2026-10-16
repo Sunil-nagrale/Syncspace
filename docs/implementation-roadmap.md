@@ -196,25 +196,38 @@ graph LR
   - `npx.cmd playwright test tests/e2e/invitations-and-sharing.spec.ts` (2/2 passed)
   - Playwright regression suite: `collaborative-whiteboards` (2/2 passed), `collaborative-documents` (2/2 passed), `auth-and-workspaces` (2/2 passed).
 
-### Phase 7B: Comments, Mentions & Notifications (Next Phase)
+### Phase 8A: Artifact Comments and Discussion Threads (Completed & Verified)
 
 - **Prerequisites**: Phase 7A complete.
 - **Deliverables**:
-  - Selection-anchored comments in Tiptap documents using Liveblocks threads.
-  - Sticky notes and contextual comment pins on Excalidraw boards.
-  - Inline `@mention` user autocomplete and notification trigger.
-  - In-app notification center inbox with unread counts and direct artifact deep-links.
+  - Normalized relational data architecture (`CommentThread`, `Comment`, `CommentReaction` models in PostgreSQL with Prisma 7).
+  - Migration `20261016131803_add_artifact_comments` applied cleanly to PostgreSQL.
+  - Complete backend service layer (`CommentService`) covering thread creation, replies, editing, deletion with moderator support, resolving/reopening lifecycle, and reaction toggling with atomic duplicate prevention.
+  - RESTful API endpoints at `/api/artifacts/[artifactId]/comments/*` with strict workspace tenancy and artifact-level access control (`AuthorizationService.requireArtifactAccess`).
+  - IDOR security defense returning 404 for non-members and 403 for revoked `NONE` overrides.
+  - Universal responsive discussion panel (`ArtifactDiscussionPanel`) integrated into both collaborative documents (`/app/documents/[documentId]`) and collaborative whiteboards (`/app/whiteboards/[boardId]`).
+  - Tab filtering (Open / Resolved / All), thread resolution, inline reply composer, emoji reaction pills and quick-picker, author-only edit dialog, and delete confirmation modal.
+- **Automated Verification**:
+  - `npm.cmd run test:integration` (4 files, 19 passed, 0 failed, includes 7 dedicated database integration tests in `comments.test.ts`)
+  - `npm.cmd run test` (9 files, 65 passed, 0 failed)
+  - `npm.cmd run lint` (0 errors, 0 warnings)
+  - `npx.cmd tsc --noEmit` (0 errors)
+  - `npm.cmd run build` (18/18 routes compiled clean, all comment API endpoints generated)
+  - `npx.cmd playwright test tests/e2e/artifact-comments.spec.ts` (2/2 passed)
+  - Playwright regression suite: `invitations-and-sharing` (2/2 passed), `collaborative-whiteboards` (2/2 passed), `collaborative-documents` (2/2 passed), `auth-and-workspaces` (2/2 passed).
+
+### Phase 8B: Mentions, Activity Feeds & Notification Delivery (Next Phase)
+
+- **Prerequisites**: Phase 8A complete.
+- **Deliverables**:
+  - Inline `@mention` user autocomplete suggestions during comment composition.
+  - In-app notification center inbox with unread counts and direct artifact discussion deep-links.
+  - Workspace activity feed logging comment actions (`COMMENT_CREATED`, `COMMENT_RESOLVED`).
 - **Expected Files / Modules**:
-  - `src/features/comments/components/comment-thread.tsx`, `src/features/comments/components/comment-panel.tsx`
-  - `src/features/notifications/components/notifications-popover.tsx`
   - `src/app/api/users/mention-suggestions/route.ts`
-- **Acceptance Criteria**:
-  - Leaving a comment on highlighted text pins the thread to the document range.
-  - Mentioning a user triggers an in-app notification for that user.
-- **Automated Tests**:
-  - Integration test for mention suggestion search and comment creation.
-- **External Dependencies**: Liveblocks comments infrastructure.
-- **Definition of Done**: Threaded discussions, mentions, and notifications work seamlessly across documents and whiteboards.
+  - `src/components/notifications/notifications-popover.tsx`
+  - `src/services/notification.service.ts`
+- **Definition of Done**: Mentions trigger notifications and workspace activity logs without destabilizing core commenting.
 
 ---
 

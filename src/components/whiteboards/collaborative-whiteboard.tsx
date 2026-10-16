@@ -15,7 +15,9 @@ import {
   FileImage,
   Code,
   FileText,
+  MessageSquare,
 } from "lucide-react";
+import { ArtifactDiscussionPanel } from "@/components/comments/artifact-discussion-panel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -257,12 +259,17 @@ function WhiteboardWorkspaceLayout({
   onPointerUpdate,
   saveState,
   lastSavedText,
+  currentUser,
 }: WhiteboardWorkspaceLayoutProps) {
   const canEdit = effectiveRole !== "VIEWER";
   const canAdmin = effectiveRole === "OWNER" || effectiveRole === "ADMIN";
 
   const [title, setTitle] = useState(initialTitle);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
+
+  // Discussion / Comments state
+  const [isCommentsOpen, setIsCommentsOpen] = useState(false);
+  const [commentCount, setCommentCount] = useState<number | null>(null);
 
   // Share & Permissions modal state
   const [shareOpen, setShareOpen] = useState(false);
@@ -622,6 +629,26 @@ function WhiteboardWorkspaceLayout({
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {/* Comments Toggle Button */}
+            <Button
+              size="sm"
+              variant={isCommentsOpen ? "secondary" : "outline"}
+              className="h-7 text-xs gap-1.5"
+              onClick={() => setIsCommentsOpen(!isCommentsOpen)}
+              data-testid="whiteboard-comments-trigger"
+            >
+              <MessageSquare className="h-3 w-3" />
+              <span className="hidden sm:inline">Comments</span>
+              {commentCount !== null && commentCount > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="text-[10px] h-4 px-1 py-0 font-normal bg-brand-indigo/15 text-brand-indigo"
+                >
+                  {commentCount}
+                </Badge>
+              )}
+            </Button>
+
             {/* Share Dialog Button */}
             <Dialog open={shareOpen} onOpenChange={setShareOpen}>
               <Button
@@ -788,6 +815,17 @@ function WhiteboardWorkspaceLayout({
             onPointerUpdate={onPointerUpdate}
           />
         </div>
+
+        {/* Artifact Discussion Panel */}
+        <ArtifactDiscussionPanel
+          artifactId={whiteboardId}
+          isOpen={isCommentsOpen}
+          onClose={() => setIsCommentsOpen(false)}
+          currentUser={currentUser}
+          canComment={true}
+          effectiveRole={effectiveRole}
+          onThreadCountChange={setCommentCount}
+        />
       </div>
     </TooltipProvider>
   );

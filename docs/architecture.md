@@ -100,7 +100,7 @@ Located in `@/services` to decouple HTTP transport from business logic:
 - `WorkspaceService`: Tenant lifecycle, slug verification, workspace member enrollment, role updates, and last-owner protection.
 - `InvitationService`: Generates 256-bit cryptographic tokens with SHA-256 hashing at rest, validates 7-day expiration, enforces email normalization and strict session matching, handles duplicate pending invites, and executes atomic acceptance transactions.
 - `ArtifactService`: CRUD operations on documents and whiteboards, title updates, soft-deletion, and effective permission calculation (`resolveEffectivePermission`).
-
+- `CommentService`: Threaded discussion lifecycle, root thread creation, reply appending, author-only editing, author and moderator comment deletion with automatic thread cascade, resolve/reopen audit tracking, and emoji reaction toggles with database-level uniqueness enforcement.
 - `LiveblocksAuthService`: Encapsulates `@liveblocks/node` client; converts database roles (`OWNER`, `ADMIN`, `EDITOR`, `VIEWER`) into Liveblocks permission scopes (`["room:write"]` vs `["room:read"]`).
 - `VersionService`: Manages periodic snapshot generation and rollbacks for documents and whiteboards in PostgreSQL `ArtifactVersion`.
 - `StorageService`: Manages AWS S3 / MinIO client connections, signed URL generation, and lifecycle deletion of attachment assets.

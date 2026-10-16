@@ -27,6 +27,7 @@ erDiagram
     Workspace ||--o{ Invitation : "issues"
     Workspace ||--o{ Project : "contains"
     Workspace ||--o{ Artifact : "owns"
+    Workspace ||--o{ CommentThread : "scopes"
     Workspace ||--o{ ActivityEvent : "logs"
 
     Project ||--o{ Artifact : "organizes"
@@ -34,6 +35,10 @@ erDiagram
     Artifact ||--o{ ArtifactPermission : "overrides"
     Artifact ||--o{ ArtifactVersion : "archives"
     Artifact ||--o{ Attachment : "attaches"
+    Artifact ||--o{ CommentThread : "hosts"
+
+    CommentThread ||--o{ Comment : "contains"
+    Comment ||--o{ CommentReaction : "receives"
 
     WorkspaceMember }|--|| Workspace : "member of"
     WorkspaceMember }|--|| User : "identifies"
@@ -211,7 +216,64 @@ Uploaded media and files attached to documents or whiteboards.
 
 ---
 
-### 3.5 Activity & Notifications
+### 3.5 Artifact Discussions & Comments (Phase 8A)
+
+#### `CommentThread`
+Top-level contextual or general discussion thread attached to an artifact.
+- **Fields**:
+  - `id`: `String` (cuid, Primary Key)
+  - `artifactId`: `String` (Foreign Key -> `Artifact.id`, Cascades)
+  - `workspaceId`: `String` (Foreign Key -> `Workspace.id`, Cascades)
+  - `createdById`: `String` (Foreign Key -> `User.id`, Cascades)
+  - `isResolved`: `Boolean` (Default: `false`)
+  - `resolvedById`: `String?` (Foreign Key -> `User.id`, SetNull)
+  - `resolvedAt`: `DateTime?`
+  - `anchorType`: `CommentAnchorType` (`GENERAL`, `TEXT_SELECTION`, `CANVAS_ELEMENT`, `CANVAS_COORDINATE`, Default: `GENERAL`)
+  - `anchorData`: `Json?` (Contextual anchor coordinates, block IDs, or element IDs)
+  - `createdAt`: `DateTime` (Default: `now()`)
+  - `updatedAt`: `DateTime`
+- **Constraints & Indexes**:
+  - `@@index([artifactId, isResolved, createdAt])`
+  - `@@index([workspaceId])`
+  - `@@index([createdById])`
+- **Lifecycle & Moderation**:
+  - Deleting the root comment in a thread automatically deletes the parent `CommentThread` and cascades to all child replies and reactions.
+  - Resolving / reopening can be triggered by thread author, artifact editors, or workspace admins/owners.
+
+#### `Comment`
+Individual comment item (root comment or chronological reply) inside a `CommentThread`.
+- **Fields**:
+  - `id`: `String` (cuid, Primary Key)
+  - `threadId`: `String` (Foreign Key -> `CommentThread.id`, Cascades)
+  - `authorId`: `String` (Foreign Key -> `User.id`, Cascades)
+  - `content`: `String` (Text, max 10,000 chars)
+  - `isEdited`: `Boolean` (Default: `false`)
+  - `editedAt`: `DateTime?`
+  - `createdAt`: `DateTime` (Default: `now()`)
+  - `updatedAt`: `DateTime`
+- **Constraints & Indexes**:
+  - `@@index([threadId, createdAt])`
+  - `@@index([authorId])`
+- **Permissions**:
+  - Editing is strictly restricted to the comment author (`authorId`).
+  - Deletion is permitted for the comment author (`authorId`) or workspace moderators (`OWNER` / `ADMIN`).
+
+#### `CommentReaction`
+Lightweight emoji reaction on an individual comment item.
+- **Fields**:
+  - `id`: `String` (cuid, Primary Key)
+  - `commentId`: `String` (Foreign Key -> `Comment.id`, Cascades)
+  - `userId`: `String` (Foreign Key -> `User.id`, Cascades)
+  - `emoji`: `String` (UTF-8 emoji string, max 16 chars)
+  - `createdAt`: `DateTime` (Default: `now()`)
+- **Constraints & Indexes**:
+  - `@@unique([commentId, userId, emoji])` (Strict database guarantee preventing duplicate reactions)
+  - `@@index([commentId])`
+  - `@@index([userId])`
+
+---
+
+### 3.6 Activity & Notifications
 
 #### `ActivityEvent`
 Workspace-level audit log.

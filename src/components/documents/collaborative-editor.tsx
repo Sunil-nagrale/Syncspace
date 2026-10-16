@@ -58,7 +58,6 @@ import {
   Trash2,
   Copy,
   Shield,
-  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -91,6 +90,7 @@ import {
   type DocumentHeadingItem,
   type SlashCommandDefinition,
 } from "./editor-extensions";
+import { ArtifactDiscussionPanel } from "@/components/comments/artifact-discussion-panel";
 
 export interface CollaborativeDocumentProps {
   documentId: string;
@@ -374,6 +374,7 @@ function RichTextDocumentWorkspace({
   selfCollaborator,
   remoteCollaborators,
   initialContent,
+  currentUser,
 }: RichTextDocumentWorkspaceProps) {
   const canEdit = effectiveRole !== "VIEWER";
   const canAdmin = effectiveRole === "OWNER" || effectiveRole === "ADMIN";
@@ -1878,40 +1879,15 @@ function RichTextDocumentWorkspace({
           </aside>
         )}
 
-        {/* Contextual Comments Entry Drawer */}
-        {showCommentsDrawer && (
-          <aside
-            className="w-72 border-l bg-card/40 p-4 overflow-y-auto flex flex-col gap-3"
-            aria-label="Document Comments"
-            data-testid="document-comments-panel"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <MessageSquare className="h-3.5 w-3.5 text-brand-indigo" />
-                <span className="text-xs font-semibold">
-                  Anchored Discussions
-                </span>
-              </div>
-              <Badge variant="secondary" className="text-[10px]">
-                Room Ready
-              </Badge>
-            </div>
-            <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground space-y-2 leading-relaxed">
-              <div className="flex items-center gap-1.5 text-foreground font-medium">
-                <Sparkles className="h-3.5 w-3.5 text-brand-indigo" />
-                <span>Contextual Review Threads</span>
-              </div>
-              <p>
-                This document is bound to Liveblocks room{" "}
-                <code className="text-[11px] font-mono text-foreground">
-                  {liveblocksRoomId}
-                </code>
-                . Inline selection-anchored threads, @mentions, and notification
-                inbox routing are scheduled for Phase F.
-              </p>
-            </div>
-          </aside>
-        )}
+        {/* Artifact Discussion Panel */}
+        <ArtifactDiscussionPanel
+          artifactId={documentId}
+          isOpen={showCommentsDrawer}
+          onClose={() => setShowCommentsDrawer(false)}
+          currentUser={currentUser ?? selfCollaborator}
+          canComment={true}
+          effectiveRole={effectiveRole}
+        />
       </div>
     </div>
   );

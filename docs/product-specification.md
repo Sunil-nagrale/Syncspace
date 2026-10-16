@@ -159,15 +159,19 @@ SyncSpace takes inspiration from:
     - Typing concurrently in the exact same sentence produces no character loss or duplication.
     - Tiptap's native undo/redo history is disabled in favor of Liveblocks/Yjs undo manager to ensure local undos do not revert remote users' edits.
 
-- **US-C2: Contextual Document Comments**
-  - *As an* Editor or Viewer,  
-  *I want to* highlight a phrase and leave a comment with an `@mention`,  
-  *so that* the author receives an alert and can respond in a threaded conversation.
+- **US-C2: Artifact Discussion Threads, Replies & Reactions (Phase 8A)**
+  - *As an* Editor or Viewer,
+  *I want to* open a discussion panel on a document or whiteboard, start a discussion thread, reply to teammates, and react with emojis,
+  *so that* our team can deliberate on decisions, provide feedback, and resolve action items.
   - **Acceptance Criteria**:
-    - Highlighting text displays a floating bubble menu with an "Add Comment" action.
-    - Comments are tied to text ranges via Liveblocks comments thread extension.
-    - Mentioning `@Jane` queries `/api/users/mention-suggestions` and sends a notification event to Jane.
-    - Resolving a comment hides it from the default editor view while keeping it in the resolved comment archive.
+    - Users can toggle a responsive discussion panel from the document or whiteboard header.
+    - Thread creation stores root comments in PostgreSQL and displays author identity, timestamp, and optional anchor type.
+    - Team members can post chronological replies to existing threads.
+    - Comment authors can edit their own comments; edits display an `(edited)` indicator.
+    - Comment authors or workspace moderators (`OWNER` / `ADMIN`) can delete comments; deleting a root comment deletes the entire thread.
+    - Users can toggle emoji reactions on any comment with database-enforced unique constraints preventing duplicate reactions.
+    - Threads can be marked resolved or reopened by authors, editors, or admins; tab filters allow viewing Open, Resolved, or All discussions.
+    - IDOR security isolation ensures non-members receive 404 Not Found and revoked `NONE` overrides receive 403 Forbidden.
 
 ---
 

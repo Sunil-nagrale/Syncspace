@@ -264,3 +264,39 @@ Collaborative teams require seamless onboarding via workspace invitations, flexi
    - Removing a member deletes the `WorkspaceMember` row and cleans up all explicit `ArtifactPermission` overrides for that workspace inside an atomic transaction.
    - Any subsequent HTTP request by the user fails immediately with `404 Not Found` (IDOR defense) or `403 Forbidden`.
    - Subsequent `/api/liveblocks-auth` room token requests are denied. Existing short-lived Liveblocks tokens (5–15 min) expire naturally, and future WebSocket reconnections are blocked.
+
+---
+
+### ADR 11: Artifact Comments, Threaded Discussions, and Moderation Architecture (Phase 8A)
+
+#### Context
+Collaborative documents and whiteboards require contextual discussions, review threads, and emoji reactions. Commenting systems must maintain relational integrity, support multi-level authorization (authors vs workspace moderators vs viewers), prevent IDOR vulnerabilities across workspaces, and guarantee that deleting root comments cascades predictably.
+
+#### Decision
+
+1. **Normalized Relational Data Architecture**:
+   - Model discussions with three normalized PostgreSQL tables: `CommentThread`, `Comment`, and `CommentReaction`.
+   - `CommentThread` captures thread-level metadata (`isResolved`, `resolvedById`, `resolvedAt`, `anchorType`, `anchorData`).
+   - `Comment` stores the root comment and all chronological replies (`threadId`, `authorId`, `content`, `isEdited`, `editedAt`).
+   - `CommentReaction` stores individual user emoji reactions (`commentId`, `userId`, `emoji`).
+
+2. **Atomic Lifecycle & Cascading Rules**:
+   - Deleting the root comment of a thread automatically deletes the entire `CommentThread` and all associated replies and reactions via PostgreSQL `onDelete: Cascade`.
+   - Deleting an individual reply removes only that reply without affecting the thread or sibling replies.
+   - Resolving a thread marks `isResolved: true` and logs the resolving user and timestamp. Resolving or reopening can be triggered by the thread author, artifact editors, or workspace admins/owners.
+
+3. **Role-Based Authorization & IDOR Defense**:
+   - Every comment API endpoint verifies workspace tenancy and artifact access via `AuthorizationService.requireArtifactAccess(userId, artifactId, "VIEW")`.
+   - If the user is not a member of the workspace, the server responds with `404 Not Found` to prevent information disclosure (IDOR isolation).
+   - If the user has an explicit `NONE` override on the artifact, the server returns `403 Forbidden`.
+   - Users with `VIEWER` permissions can view and post comments/reactions unless explicitly blocked by a `NONE` override.
+   - Comment edits are strictly restricted to the comment author (`authorId`).
+   - Comment deletion is restricted to either the comment author or workspace moderators (`OWNER` / `ADMIN`).
+
+4. **Duplicate Reaction Prevention**:
+   - A composite unique constraint `@@unique([commentId, userId, emoji])` at the database level guarantees idempotence and prevents race conditions when toggling reactions.
+   - The reaction endpoint toggles: if the reaction exists for that user and emoji, it is deleted; otherwise, it is inserted with an atomic catch on unique constraint violations.
+
+5. **Universal Artifact Discussion Panel**:
+   - A unified responsive discussion panel (`ArtifactDiscussionPanel`) is integrated into both the document editor (`/app/documents/[documentId]`) and the whiteboard editor (`/app/whiteboards/[boardId]`).
+   - Provides filtering by Open, Resolved, and All threads, inline reply composers, emoji reaction pickers, and live counts.
