@@ -371,7 +371,9 @@ export class NotificationService {
   }
 
   /**
-   * Mark a single notification as read, enforcing strict IDOR isolation and active authorization.
+   * Mark a single notification as read, enforcing atomic authorization and strict IDOR isolation.
+   * Performs a conditional database update including the full authorization predicate to eliminate
+   * any time-of-check / time-of-use (TOCTOU) authorization race conditions.
    */
   static async markAsRead(params: {
     actorUserId: string;
@@ -379,6 +381,19 @@ export class NotificationService {
   }): Promise<FormattedNotification> {
     const { actorUserId, notificationId } = params;
 
+    // 1. Perform atomic conditional update including full authorization predicate
+    await prisma.notification.updateMany({
+      where: {
+        id: notificationId,
+        ...this.getAccessibleWhere(actorUserId),
+        readAt: null,
+      },
+      data: {
+        readAt: new Date(),
+      },
+    });
+
+    // 2. Fetch the notification using the full access predicate to format response or preserve idempotency
     const existing = await prisma.notification.findFirst({
       where: {
         id: notificationId,
@@ -404,87 +419,37 @@ export class NotificationService {
       },
     });
 
+    // If access is no longer valid or notification does not exist, return safe not-found error
     if (!existing) {
       throw new NotFoundError("Notification not found.");
     }
 
-    if (existing.readAt) {
-      return {
-        id: existing.id,
-        recipientId: existing.recipientId,
-        actorId: existing.actorId,
-        workspaceId: existing.workspaceId,
-        artifactId: existing.artifactId,
-        threadId: existing.threadId,
-        commentId: existing.commentId,
-        type: existing.type,
-        readAt: existing.readAt.toISOString(),
-        createdAt: existing.createdAt.toISOString(),
-        metadata: (existing.metadata as FormattedNotification["metadata"]) ?? null,
-        actor: existing.actor,
-        artifact: existing.artifact,
-      };
-    }
-
-    const updated = await prisma.notification.update({
-      where: { id: notificationId },
-      data: { readAt: new Date() },
-      include: {
-        actor: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-            color: true,
-          },
-        },
-        artifact: {
-          select: {
-            id: true,
-            title: true,
-            type: true,
-            isArchived: true,
-          },
-        },
-      },
-    });
-
     return {
-      id: updated.id,
-      recipientId: updated.recipientId,
-      actorId: updated.actorId,
-      workspaceId: updated.workspaceId,
-      artifactId: updated.artifactId,
-      threadId: updated.threadId,
-      commentId: updated.commentId,
-      type: updated.type,
-      readAt: updated.readAt ? updated.readAt.toISOString() : null,
-      createdAt: updated.createdAt.toISOString(),
-      metadata: (updated.metadata as FormattedNotification["metadata"]) ?? null,
-      actor: updated.actor,
-      artifact: updated.artifact,
+      id: existing.id,
+      recipientId: existing.recipientId,
+      actorId: existing.actorId,
+      workspaceId: existing.workspaceId,
+      artifactId: existing.artifactId,
+      threadId: existing.threadId,
+      commentId: existing.commentId,
+      type: existing.type,
+      readAt: existing.readAt ? existing.readAt.toISOString() : null,
+      createdAt: existing.createdAt.toISOString(),
+      metadata: (existing.metadata as FormattedNotification["metadata"]) ?? null,
+      actor: existing.actor,
+      artifact: existing.artifact,
     };
   }
 
   /**
-   * Mark all accessible unread notifications for a user as read.
+   * Mark all accessible unread notifications for a user as read atomically in a single bounded mutation.
+   * Evaluates the authorization predicate directly at mutation time, avoiding stale ID lists.
    */
   static async markAllAsRead(actorUserId: string): Promise<{ count: number }> {
-    const accessibleUnread = await prisma.notification.findMany({
+    const result = await prisma.notification.updateMany({
       where: {
         ...this.getAccessibleWhere(actorUserId),
         readAt: null,
-      },
-      select: { id: true },
-    });
-
-    if (accessibleUnread.length === 0) {
-      return { count: 0 };
-    }
-
-    const result = await prisma.notification.updateMany({
-      where: {
-        id: { in: accessibleUnread.map((n) => n.id) },
       },
       data: {
         readAt: new Date(),

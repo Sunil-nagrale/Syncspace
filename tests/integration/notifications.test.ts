@@ -576,4 +576,169 @@ describe("Phase 8B — @Mentions and In-App Notifications Integration Tests", ()
     expect(inbox.notifications.length).toBe(1);
     expect(inbox.notifications[0].threadId).toBe(thread1.id);
   });
+
+  it("atomically marks notifications as read without TOCTOU race vulnerability and preserves idempotency", async () => {
+    const { author, recipient, artifact, outsider } =
+      await setupTestEnvironment();
+
+    // 1. Author creates a thread mentioning recipient
+    const thread = await CommentService.createThread({
+      actorUserId: author.id,
+      artifactId: artifact.id,
+      content: `TOCTOU validation test: @[${recipient.name}](${recipient.id})`,
+    });
+
+    const notifs = await prisma.notification.findMany({
+      where: {
+        recipientId: recipient.id,
+        commentId: thread.rootComment!.id,
+      },
+    });
+    expect(notifs.length).toBe(1);
+    const notifId = notifs[0].id;
+    expect(notifs[0].readAt).toBeNull();
+
+    // 2. Simulate concurrent race: access is revoked (e.g. explicit NONE override added)
+    await prisma.artifactPermission.create({
+      data: {
+        artifactId: artifact.id,
+        userId: recipient.id,
+        role: "NONE",
+      },
+    });
+
+    // 3. Recipient attempts markAsRead: atomic updateMany must match 0 rows and findFirst must reject
+    await expect(
+      NotificationService.markAsRead({
+        actorUserId: recipient.id,
+        notificationId: notifId,
+      })
+    ).rejects.toThrow(NotFoundError);
+
+    // Verify in raw DB that the record was NEVER mutated to read state
+    const rawNotifAfterRevoke = await prisma.notification.findUniqueOrThrow({
+      where: { id: notifId },
+    });
+    expect(rawNotifAfterRevoke.readAt).toBeNull();
+
+    // 4. Restore access by deleting NONE override
+    await prisma.artifactPermission.delete({
+      where: {
+        artifactId_userId: {
+          artifactId: artifact.id,
+          userId: recipient.id,
+        },
+      },
+    });
+
+    // 5. With access restored, markAsRead succeeds atomically
+    const marked = await NotificationService.markAsRead({
+      actorUserId: recipient.id,
+      notificationId: notifId,
+    });
+    expect(marked.readAt).not.toBeNull();
+
+    const rawNotifAfterSuccess = await prisma.notification.findUniqueOrThrow({
+      where: { id: notifId },
+    });
+    expect(rawNotifAfterSuccess.readAt).not.toBeNull();
+
+    // 6. Idempotency test: calling markAsRead again on already-read notification returns successfully
+    const idempotentMark = await NotificationService.markAsRead({
+      actorUserId: recipient.id,
+      notificationId: notifId,
+    });
+    expect(idempotentMark.id).toBe(notifId);
+    expect(idempotentMark.readAt).toBe(marked.readAt);
+
+    // 7. Cross-recipient isolation: outsider cannot mark or access recipient's notification
+    await expect(
+      NotificationService.markAsRead({
+        actorUserId: outsider.id,
+        notificationId: notifId,
+      })
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("atomically marks all accessible notifications as read in a single query without updating revoked notifications", async () => {
+    const { author, recipient, workspace, project } =
+      await setupTestEnvironment();
+
+    // 1. Create two separate artifacts in the workspace
+    const artifact1 = await ArtifactService.createArtifact(author.id, {
+      workspaceId: workspace.id,
+      projectId: project.id,
+      title: "Active Spec",
+      type: "DOCUMENT",
+    });
+
+    const artifact2 = await ArtifactService.createArtifact(author.id, {
+      workspaceId: workspace.id,
+      projectId: project.id,
+      title: "Confidential Restricted Spec",
+      type: "DOCUMENT",
+    });
+
+    // 2. Create 2 mentions on artifact1 and 2 mentions on artifact2
+    for (let i = 1; i <= 2; i++) {
+      await CommentService.createThread({
+        actorUserId: author.id,
+        artifactId: artifact1.id,
+        content: `Artifact 1 Thread ${i}: @[${recipient.name}](${recipient.id})`,
+      });
+      await CommentService.createThread({
+        actorUserId: author.id,
+        artifactId: artifact2.id,
+        content: `Artifact 2 Thread ${i}: @[${recipient.name}](${recipient.id})`,
+      });
+    }
+
+    // Recipient has 4 unread notifications across both artifacts
+    let initialCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(initialCount).toBe(4);
+
+    // 3. Revoke access on artifact2 via explicit NONE override
+    await prisma.artifactPermission.create({
+      data: {
+        artifactId: artifact2.id,
+        userId: recipient.id,
+        role: "NONE",
+      },
+    });
+
+    // Unread count immediately reflects only accessible notifications (2)
+    let accessibleCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(accessibleCount).toBe(2);
+
+    // 4. Perform atomic markAllAsRead in a single query
+    const markAllResult = await NotificationService.markAllAsRead(recipient.id);
+
+    // Must return exactly 2 (the accessible ones)
+    expect(markAllResult.count).toBe(2);
+
+    // 5. Verify database state directly:
+    // Artifact 1 notifications must be marked read
+    const art1Notifs = await prisma.notification.findMany({
+      where: {
+        recipientId: recipient.id,
+        artifactId: artifact1.id,
+      },
+    });
+    expect(art1Notifs.length).toBe(2);
+    art1Notifs.forEach((n) => expect(n.readAt).not.toBeNull());
+
+    // Artifact 2 notifications must remain untouched (readAt === null) in raw DB!
+    const art2Notifs = await prisma.notification.findMany({
+      where: {
+        recipientId: recipient.id,
+        artifactId: artifact2.id,
+      },
+    });
+    expect(art2Notifs.length).toBe(2);
+    art2Notifs.forEach((n) => expect(n.readAt).toBeNull());
+
+    // Unread count is now 0
+    const finalCount = await NotificationService.getUnreadCount(recipient.id);
+    expect(finalCount).toBe(0);
+  });
 });
