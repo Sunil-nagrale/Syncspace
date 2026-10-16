@@ -128,12 +128,26 @@ When an Admin or Owner revokes a user's membership:
 
 ## 6. Invitation Security & Expiration
 
-- **Token Generation**: Generated using cryptographically strong pseudo-random bytes (`crypto.randomBytes(32).toString('hex')`).
-- **Expiration Window**: Strict 7-day expiration (`expiresAt < new Date()`).
-- **Single-Use Enforcement**: When accepted, status flips from `PENDING` to `ACCEPTED` in an atomic database transaction. Subsequent attempts to use the same token are rejected.
-- **Tenant Verification**: The inviting user must possess `OWNER` or `ADMIN` roles in that specific workspace.
+- **Token Generation**: Generated using 256 bits of cryptographically strong pseudo-random entropy (`crypto.randomBytes(32).toString('hex')`).
+- **Token Hashing at Rest**: Raw bearer tokens are **never stored** in PostgreSQL. The server computes `sha256(rawToken)` and persists the 64-character hexadecimal digest in `Invitation.token`. Lookup queries hash the incoming raw token and match on the unique index.
+- **Expiration Window**: Strict 7-day expiration (`expiresAt < new Date()`). Expired invitations reject acceptance and return status `EXPIRED`.
+- **Single-Use Enforcement**: When accepted, the invitation's status transitions from `PENDING` to `ACCEPTED` inside an isolated atomic database transaction (`prisma.$transaction`). Subsequent attempts are immediately rejected (`ALREADY_ACCEPTED`).
+- **Email Normalization & Strict Session Matching**:
+  - Invitation recipient emails are normalized using `.trim().toLowerCase()`.
+  - When an authenticated user attempts to accept an invitation, the server validates:
+    `user.email.trim().toLowerCase() === invitation.email.trim().toLowerCase()`
+  - If the session email differs, acceptance is denied with `403 Forbidden` (`ACCOUNT_MISMATCH`). The UI prompts the user to switch accounts or sign in with the invited address.
+- **Role Boundary & Ownership Protection**:
+  - Invitations can **never grant OWNER status**. Attempting to invite an `OWNER` fails with `400 Bad Request`.
+  - An `ADMIN` cannot invite an `OWNER` or another `ADMIN`. Only an `OWNER` can invite an `ADMIN`. Regular members (`EDITOR`, `VIEWER`) cannot invite anyone.
+  - An `ADMIN` cannot promote another member to `ADMIN` or demote an `OWNER`.
+  - The last remaining `OWNER` cannot be demoted or removed from a workspace (`Cannot demote/remove the only workspace owner`).
+- **Acceptance Race Protection**:
+  - Database-level `@@unique([workspaceId, userId])` prevents duplicate memberships.
+  - Transactions re-read the invitation row and check active membership before inserting `WorkspaceMember`.
 
 ---
+
 
 ## 7. Secure File Storage & Presigned URLs
 

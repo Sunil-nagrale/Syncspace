@@ -224,3 +224,43 @@ Implement an authoritative two-way synchronization adapter (`useWhiteboardSync`)
 - **Atomic Freehand Strokes**: Freehand drawing (`freedraw`) and polygon points are treated as atomic point arrays; concurrent edits to the same freehand stroke do not interleave individual points.
 - **Local Undo/Redo**: Excalidraw's undo/redo history is local to the client. Undoing an action produces a new forward mutation with an incremented version rather than rewinding shared cloud state.
 - **Liveblocks Connection Limits**: Cloud room concurrency is constrained by the provisioned Liveblocks plan tier.
+
+---
+
+### ADR 10: Workspace Invitations, Token Hashing, and Granular Artifact Sharing Precedence
+
+#### Context
+Collaborative teams require seamless onboarding via workspace invitations, flexible role-based access control, and fine-grained per-artifact permission overrides on documents and whiteboards. Storing raw bearer tokens at rest introduces severe exposure risks if the database is backed up or compromised. Unrestricted invitation acceptance could allow rogue users to hijack invited slots or elevate themselves to unauthorized roles.
+
+#### Decision
+
+1. **Cryptographic Token Hashing at Rest**:
+   - Invitation links contain an unguessable 256-bit bearer token (`crypto.randomBytes(32).toString('hex')`).
+   - The server hashes the token using SHA-256 (`crypto.createHash('sha256').update(rawToken).digest('hex')`) and only persists the hexadecimal digest in the `Invitation.token` column.
+   - Raw bearer tokens are never stored, logged, or returned in unrestricted listing endpoints.
+   - Lookups compute the SHA-256 digest of the client-supplied token and match on the unique index `invitation_token_key`.
+
+2. **Invitation Expiration & Single-Use Enforcement**:
+   - Invitations expire automatically after 7 days (`expiresAt < new Date()`).
+   - Acceptance transitions status from `PENDING` to `ACCEPTED` inside an isolated database transaction (`prisma.$transaction`).
+   - Duplicate acceptance attempts are rejected (`ALREADY_ACCEPTED`).
+
+3. **Strict Email Matching**:
+   - To prevent token theft (e.g., forwarded or intercepted links), the server normalizes both emails (`.trim().toLowerCase()`) and requires that the authenticated session user's email strictly matches the invitation's recipient email.
+   - If an account mismatch is detected, the API rejects acceptance with `403 Forbidden` (`ACCOUNT_MISMATCH`), and the UI offers a prompt to switch accounts or register with the invited address.
+
+4. **Role Boundaries & Owner Protection**:
+   - **No Owner Invitations**: Workspace ownership can never be granted via invitations.
+   - **Admin Hierarchy**: Admins can only invite `EDITOR` or `VIEWER` roles. Only an `OWNER` can invite an `ADMIN`.
+   - **Last Owner Protection**: The last remaining `OWNER` of a workspace cannot be demoted or removed (`Cannot demote/remove the only workspace owner`).
+
+5. **Granular Artifact Permission Overrides**:
+   - `ArtifactPermission` rows allow setting per-user overrides: `EDITOR`, `VIEWER`, or `NONE` (revoke).
+   - `NONE` completely revokes access to the artifact, denying view, edit, and Liveblocks room token issuance with `403 Forbidden`, even if the user is an `EDITOR`, `ADMIN`, or `OWNER` in the parent workspace.
+   - `VIEWER` restricts the user to read-only access, enforcing `canWrite: false`, read-only UI banners, and Liveblocks `READ_ACCESS` (`["*:read"]`).
+   - `INHERIT` deletes the explicit override, restoring default workspace membership permissions.
+
+6. **Member Removal & Revocation Policy**:
+   - Removing a member deletes the `WorkspaceMember` row and cleans up all explicit `ArtifactPermission` overrides for that workspace inside an atomic transaction.
+   - Any subsequent HTTP request by the user fails immediately with `404 Not Found` (IDOR defense) or `403 Forbidden`.
+   - Subsequent `/api/liveblocks-auth` room token requests are denied. Existing short-lived Liveblocks tokens (5–15 min) expire naturally, and future WebSocket reconnections are blocked.

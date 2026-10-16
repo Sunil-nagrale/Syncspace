@@ -104,19 +104,55 @@ npx.cmd tsc --noEmit
 npm.cmd run test
 ```
 
+### Integration Testing (Real PostgreSQL)
+```powershell
+# Runs database persistence, RBAC overrides, and invitation lifecycle suites against localhost:5432
+npm.cmd run test:integration
+```
+
 ### End-to-End Testing (Playwright)
 ```powershell
 # Ensure Playwright browser binaries are installed
 npx.cmd playwright install chromium
 
-# Run tests
+# Run all E2E suites
 npm.cmd run test:e2e
+
+# Run targeted E2E suites
+npx.cmd playwright test tests/e2e/invitations-and-sharing.spec.ts
+npx.cmd playwright test tests/e2e/collaborative-whiteboards.spec.ts
+npx.cmd playwright test tests/e2e/collaborative-documents.spec.ts
+npx.cmd playwright test tests/e2e/auth-and-workspaces.spec.ts
 ```
 
 ### Production Build
 ```powershell
 npm.cmd run build
 ```
+
+---
+
+## 5. Transactional Email Delivery Setup (Optional)
+
+When no transactional email provider is configured, SyncSpace automatically operates in **Secure Copyable Link Mode**:
+- Workspace administrators receive an encrypted, copyable invitation link upon invitation generation.
+- The UI clearly labels email delivery as unavailable and does not produce misleading "Email sent" messages.
+
+To enable automated transactional email delivery in production or staging, configure an email provider in `.env`:
+
+```env
+# Resend Email Delivery (Recommended)
+RESEND_API_KEY=re_your_api_key_here
+EMAIL_FROM=SyncSpace <invitations@yourdomain.com>
+
+# Or SMTP Gateway
+SMTP_HOST=smtp.sendgrid.net
+SMTP_PORT=587
+SMTP_USER=apikey
+SMTP_PASSWORD=your_smtp_password
+SMTP_FROM=invitations@yourdomain.com
+```
+
 
 ---
 

@@ -172,28 +172,49 @@ graph LR
 
 ---
 
-## Phase F: Comments, Mentions, Notifications & Sharing
+## Phase F: Access Management, Invitations, Sharing, Comments & Notifications
+
+### Phase 7A: Sharing, Invitations and Access Management (Completed & Verified)
 
 - **Prerequisites**: Phase D and Phase E complete.
+- **Deliverables**:
+  - Cryptographically secure 256-bit workspace invitation tokens with SHA-256 digest hashing at rest in PostgreSQL.
+  - Complete invitation lifecycle (`createInvitation`, `validateInvitationToken`, `acceptInvitation`, `declineInvitation`, `revokeInvitation`, `resendInvitation`).
+  - Strict recipient email normalization, 7-day expiration, and authenticated session matching.
+  - Role escalation prevention: `ADMIN` can invite only `EDITOR` or `VIEWER`; `OWNER` cannot be invited; `ADMIN` cannot remove/demote other `ADMIN` or `OWNER`.
+  - Last-owner demotion and removal protection across workspace members.
+  - Transparent "Secure Copyable Link Mode" UI preventing misleading email delivery promises.
+  - Member management UI (`/app/members`) with role changing, pending invite revoke/resend, and member removal dialog.
+  - Token redemption UI (`/app/invitations/[token]`) and redirect route (`/invite/[token]`).
+  - Granular per-artifact permission overrides (`ArtifactPermission` with `EDITOR`, `VIEWER`, `NONE`, `INHERIT`) with full Liveblocks room token restriction and read-only banner enforcement.
+- **Automated Verification**:
+  - `npm.cmd run test:integration` (3 files, 12 passed, 0 skipped, 0 failed)
+  - `npm.cmd run test` (8 files, 58 passed, 0 failed)
+  - `npm.cmd run lint` (0 errors, 0 warnings)
+  - `npx.cmd tsc --noEmit` (0 errors)
+  - `npm.cmd run build` (18/18 routes compiled clean)
+  - `npx.cmd playwright test tests/e2e/invitations-and-sharing.spec.ts` (2/2 passed)
+  - Playwright regression suite: `collaborative-whiteboards` (2/2 passed), `collaborative-documents` (2/2 passed), `auth-and-workspaces` (2/2 passed).
+
+### Phase 7B: Comments, Mentions & Notifications (Next Phase)
+
+- **Prerequisites**: Phase 7A complete.
 - **Deliverables**:
   - Selection-anchored comments in Tiptap documents using Liveblocks threads.
   - Sticky notes and contextual comment pins on Excalidraw boards.
   - Inline `@mention` user autocomplete and notification trigger.
   - In-app notification center inbox with unread counts and direct artifact deep-links.
-  - Artifact sharing modal with user-specific permission overrides.
 - **Expected Files / Modules**:
-  - `features/comments/components/comment-thread.tsx`, `features/comments/components/comment-panel.tsx`
-  - `features/notifications/components/notifications-popover.tsx`
-  - `features/sharing/components/share-dialog.tsx`
-  - `app/api/users/mention-suggestions/route.ts`
+  - `src/features/comments/components/comment-thread.tsx`, `src/features/comments/components/comment-panel.tsx`
+  - `src/features/notifications/components/notifications-popover.tsx`
+  - `src/app/api/users/mention-suggestions/route.ts`
 - **Acceptance Criteria**:
   - Leaving a comment on highlighted text pins the thread to the document range.
   - Mentioning a user triggers an in-app notification for that user.
-  - Sharing an artifact with a user as `VIEWER` restricts their room token to read-only.
 - **Automated Tests**:
-  - Integration test for mention suggestion search and permission overrides.
+  - Integration test for mention suggestion search and comment creation.
 - **External Dependencies**: Liveblocks comments infrastructure.
-- **Definition of Done**: Threaded discussions, mentions, notifications, and sharing dialogs work seamlessly across documents and whiteboards.
+- **Definition of Done**: Threaded discussions, mentions, and notifications work seamlessly across documents and whiteboards.
 
 ---
 

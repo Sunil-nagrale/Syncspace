@@ -46,11 +46,17 @@ Unit tests execute quickly in an isolated Node.js environment without network or
 
 ## 4. Integration Testing (Vitest + PostgreSQL)
 
-Integration tests (`tests/integration/database.test.ts` and `tests/integration/liveblocks-auth.test.ts`) exercise full route handlers, application service boundaries, and database queries against the live `syncspace-postgres` PostgreSQL 16 Docker container.
+Integration tests (`tests/integration/database.test.ts`, `tests/integration/liveblocks-auth.test.ts`, and `tests/integration/invitations-and-sharing.test.ts`) exercise full route handlers, application service boundaries, and database queries against the live `syncspace-postgres` PostgreSQL 16 Docker container.
 
 ### Target Areas
 - **Authentication Flows (`/api/auth/*`)**:
   - Password hashing and verification, invalid credentials rejection, session cookie issuance, and logout invalidation.
+- **Invitations and Member Lifecycle (`InvitationService` & `/api/workspaces/[id]/invitations/*`)**:
+  - Cryptographically secure 256-bit token generation with SHA-256 hashing at rest.
+  - Expiration enforcement (7 days) and single-use atomic acceptance transactions.
+  - Recipient email normalization and cross-account mismatch prevention.
+  - Role escalation prevention: `ADMIN` can only invite `EDITOR` or `VIEWER`; `OWNER` cannot be invited.
+  - Last-owner protection: cannot remove or demote the last remaining `OWNER`.
 - **Liveblocks Server Authorization (`/api/liveblocks-auth` & `LiveblocksAuthService`)**:
   - Attempting to authorize a room as an unauthenticated user returns HTTP 401; unauthorized outsider returns HTTP 403/404.
   - Authorizing as an `OWNER`, `ADMIN`, or `EDITOR` grants `["*:write"]` (`FULL_ACCESS`).

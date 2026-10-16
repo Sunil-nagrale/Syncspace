@@ -102,8 +102,34 @@ SyncSpace takes inspiration from:
     - The member’s `WorkspaceMember` record is updated or deleted.
     - Next request to any route under `/[workspaceSlug]` denies access (HTTP 403).
     - If the user is currently connected to a Liveblocks room within that workspace, the backend authorization token endpoint rejects renewals and Liveblocks kicks the user off the WebSocket connection.
+    - Explicit `ArtifactPermission` overrides for the removed member are cleaned up in an atomic transaction.
+    - The last remaining workspace `OWNER` cannot be demoted or removed.
+
+- **US-B3: Secure Workspace Invitations & Token Hashing**
+  - *As a* workspace Owner or Admin,
+  *I want to* invite collaborators by email with a designated role (`ADMIN`, `EDITOR`, `VIEWER`),
+  *so that* they can join the workspace via an encrypted, single-use invitation link.
+  - **Acceptance Criteria**:
+    - Inviter specifies recipient email and role.
+    - Invitations cannot grant `OWNER` status. Admins cannot invite `ADMIN` or `OWNER` roles.
+    - Server generates an unpredictable 256-bit token, hashes it with SHA-256 at rest, and enforces a 7-day expiration.
+    - If transactional email is unconfigured, the UI presents a secure copyable invitation link and transparently indicates email service is unavailable.
+    - Unauthenticated invitees receive an invitation preview prompting login/registration.
+    - Acceptance enforces strict email matching between the authenticated user and the invitation recipient (`403 Forbidden` on mismatch).
+    - Acceptance atomically creates `WorkspaceMember` and marks the invitation `ACCEPTED`.
+
+- **US-B4: Artifact-Level Permission Overrides & Sharing**
+  - *As a* document or whiteboard owner/admin,
+  *I want to* configure explicit collaborator overrides (`EDITOR`, `VIEWER`, `NONE`, `INHERIT`),
+  *so that* sensitive assets are restricted to specific team members regardless of their default workspace role.
+  - **Acceptance Criteria**:
+    - An explicit `NONE` override denies access completely (403 on API and Liveblocks room auth).
+    - An explicit `VIEWER` override restricts an `EDITOR` to read-only mode (`canWrite: false`, read-only UI banner).
+    - `INHERIT` removes the explicit override and falls back to the workspace membership role.
+    - Overrides persist across reloads and are enforced synchronously by `/api/liveblocks-auth`.
 
 ---
+
 
 ### C. Collaborative Documents (Tiptap + Yjs + Liveblocks)
 

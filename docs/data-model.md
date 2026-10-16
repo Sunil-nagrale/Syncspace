@@ -99,17 +99,18 @@ Pending email invitations to join a workspace.
   - `id`: `String` (Primary Key)
   - `workspaceId`: `String` (Foreign Key -> `Workspace.id`)
   - `email`: `String` (Recipient email)
-  - `role`: `WorkspaceRole` (Default: `EDITOR`)
-  - `token`: `String` (Unique, cryptographically secure string)
+  - `role`: `WorkspaceRole` (Default: `EDITOR`, restricted to `ADMIN`, `EDITOR`, `VIEWER`; never `OWNER`)
+  - `token`: `String` (Unique SHA-256 hash of the 256-bit unguessable raw token for token hashing at rest; raw bearer tokens are never persisted)
   - `invitedById`: `String` (Foreign Key -> `User.id`)
   - `status`: `InvitationStatus` (Enum: `PENDING`, `ACCEPTED`, `REVOKED`, `EXPIRED`)
-  - `expiresAt`: `DateTime`
+  - `expiresAt`: `DateTime` (Default: 7 days from creation)
   - `createdAt`: `DateTime` (Default: `now()`)
 - **Constraints & Indexes**:
   - `@@unique([token])`
   - `@@index([workspaceId, email])`
   - `@@index([token, status])`
 - **Deletion Behavior**: Cascade on `Workspace` deletion.
+
 
 ---
 

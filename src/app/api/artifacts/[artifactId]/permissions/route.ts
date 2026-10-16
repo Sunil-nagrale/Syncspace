@@ -93,3 +93,57 @@ export async function PUT(
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }
+
+export async function DELETE(
+  req: Request,
+  { params }: { params: Promise<{ artifactId: string }> }
+) {
+  try {
+    const session = await getServerSession();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { artifactId } = await params;
+    const url = new URL(req.url);
+    let targetUserId = url.searchParams.get("userId");
+
+    if (!targetUserId) {
+      try {
+        const body = (await req.json()) as { userId?: string };
+        targetUserId = body?.userId ?? null;
+      } catch {
+        // Body is optional if query parameter is used
+      }
+    }
+
+    if (!targetUserId) {
+      return NextResponse.json(
+        { error: "userId query parameter or JSON body is required." },
+        { status: 400 }
+      );
+    }
+
+    await ArtifactService.setArtifactPermission(
+      session.user.id,
+      artifactId,
+      targetUserId,
+      "INHERIT"
+    );
+
+    return NextResponse.json({ success: true });
+  } catch (err: unknown) {
+    if (err instanceof NotFoundError) {
+      return NextResponse.json({ error: err.message }, { status: 404 });
+    }
+    if (err instanceof AuthorizationError) {
+      return NextResponse.json(
+        { error: err.message },
+        { status: err.statusCode }
+      );
+    }
+    const message =
+      err instanceof Error ? err.message : "Internal server error";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+}
