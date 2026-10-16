@@ -243,6 +243,9 @@ export class ArtifactService {
       }
     }
 
+    const hasSnapshot = input.contentSnapshot && typeof input.contentSnapshot === "object";
+    const safeSnapshot = hasSnapshot ? JSON.parse(JSON.stringify(input.contentSnapshot)) : undefined;
+
     const updated = await prisma.artifact.update({
       where: { id: artifactId },
       data: {
@@ -255,33 +258,65 @@ export class ArtifactService {
         ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
         ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
         ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        ...(safeSnapshot !== undefined
+          ? {
+              currentSnapshot: safeSnapshot,
+              currentRevision: { increment: 1 },
+            }
+          : {}),
         updatedById: userId,
       },
     });
 
-    if (input.contentSnapshot && typeof input.contentSnapshot === "object") {
-      const safeSnapshot = JSON.parse(JSON.stringify(input.contentSnapshot));
-      await prisma.artifactVersion.upsert({
-        where: {
-          artifactId_versionNumber: {
+    if (safeSnapshot !== undefined) {
+      // Check if this artifact has an initial version; if not, record baseline version 1
+      const versionCount = await prisma.artifactVersion.count({
+        where: { artifactId },
+      });
+
+      if (versionCount === 0) {
+        await prisma.artifactVersion.create({
+          data: {
             artifactId,
             versionNumber: 1,
+            title: updated.title,
+            snapshotData: safeSnapshot,
+            changeSummary: "Initial snapshot",
+            source: "AUTOMATIC",
+            createdById: userId,
           },
-        },
-        create: {
-          artifactId,
-          versionNumber: 1,
-          title: updated.title,
-          snapshotData: safeSnapshot,
-          changeSummary: "Latest collaborative document state",
-          createdById: userId,
-        },
-        update: {
-          title: updated.title,
-          snapshotData: safeSnapshot,
-          createdById: userId,
-        },
-      });
+        }).catch(() => {
+          // Ignore unique collision on initial baseline version
+        });
+      } else {
+        // Automatic checkpoint creation if meaningful time (5 minutes) has elapsed
+        const latestVer = await prisma.artifactVersion.findFirst({
+          where: { artifactId },
+          orderBy: { versionNumber: "desc" },
+          select: { createdAt: true, versionNumber: true },
+        });
+
+        const FIVE_MINUTES_MS = 5 * 60 * 1000;
+        if (
+          latestVer &&
+          Date.now() - latestVer.createdAt.getTime() > FIVE_MINUTES_MS
+        ) {
+          const nextVer = latestVer.versionNumber + 1;
+          await prisma.artifactVersion.create({
+            data: {
+              artifactId,
+              versionNumber: nextVer,
+              title: updated.title,
+              snapshotData: safeSnapshot,
+              changeSummary: "Periodic autosave checkpoint",
+              source: "AUTOMATIC",
+              createdById: userId,
+            },
+          }).catch(() => {
+            // Ignore race condition on periodic autosave
+          });
+        }
+      }
     }
 
     const metadataSummary: Record<string, unknown> = {};

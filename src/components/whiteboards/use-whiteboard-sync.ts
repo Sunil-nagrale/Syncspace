@@ -143,6 +143,61 @@ export function useWhiteboardSync(
     []
   );
 
+  // Liveblocks mutation to apply restored whiteboard scene to storage
+  const restoreStorageElements = useMutation(
+    ({ storage }, elementsToRestore: readonly ExcalidrawElement[]) => {
+      const liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
+      if (!liveElements) return;
+
+      const restoredIds = new Set(elementsToRestore.map((e) => e.id));
+
+      // Displace elements not in the restored scene by marking them deleted
+      for (const [key, val] of liveElements.entries()) {
+        if (!restoredIds.has(key)) {
+          const elem = val as unknown as ExcalidrawElement;
+          liveElements.set(key, {
+            ...elem,
+            isDeleted: true,
+            version: (elem.version ?? 0) + 1,
+          } as unknown as JsonObject);
+        }
+      }
+
+      // Add/overwrite all elements from restored scene
+      for (const el of elementsToRestore) {
+        const sanitized = sanitizeWhiteboardElement(el);
+        liveElements.set(el.id, sanitized as unknown as JsonObject);
+      }
+    },
+    []
+  );
+
+  const restoreScene = useCallback(
+    (restoredElements: readonly ExcalidrawElement[]) => {
+      const api = excalidrawAPIRef.current;
+      if (!api) return;
+
+      isApplyingRemoteUpdateRef.current = true;
+      api.updateScene({ elements: restoredElements });
+
+      for (const el of restoredElements) {
+        lastSyncedVersionsRef.current.set(el.id, el.version);
+      }
+
+      if (canEdit) {
+        restoreStorageElements(restoredElements);
+      }
+
+      setTimeout(() => {
+        isApplyingRemoteUpdateRef.current = false;
+      }, 50);
+
+      setSaveState("saved");
+      setLastSavedText("Just restored");
+    },
+    [excalidrawAPIRef, canEdit, restoreStorageElements]
+  );
+
   // Initial scene hydration from Liveblocks Storage or PostgreSQL snapshot
   useEffect(() => {
     const api = excalidrawAPIRef.current;
@@ -372,5 +427,6 @@ export function useWhiteboardSync(
     handlePointerUpdate,
     saveState,
     lastSavedText,
+    restoreScene,
   };
 }

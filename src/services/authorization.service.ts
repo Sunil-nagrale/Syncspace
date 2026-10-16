@@ -26,6 +26,17 @@ export class NotFoundError extends Error {
   }
 }
 
+export class ConflictError extends Error {
+  constructor(
+    message: string = "Resource conflict detected.",
+    public currentRevision?: number,
+    public statusCode: number = 409
+  ) {
+    super(message);
+    this.name = "ConflictError";
+  }
+}
+
 const ROLE_HIERARCHY: Record<WorkspaceRole, number> = {
   OWNER: 4,
   ADMIN: 3,

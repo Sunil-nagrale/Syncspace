@@ -16,8 +16,10 @@ import {
   Code,
   FileText,
   MessageSquare,
+  History,
 } from "lucide-react";
 import { ArtifactDiscussionPanel } from "@/components/comments/artifact-discussion-panel";
+import { VersionHistoryDrawer } from "@/components/versions/version-history-drawer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -147,6 +149,7 @@ function RoomBackedWhiteboardWorkspace(props: CollaborativeWhiteboardProps) {
     handlePointerUpdate,
     saveState,
     lastSavedText,
+    restoreScene,
   } = useWhiteboardSync(props, excalidrawAPIRef);
 
   return (
@@ -159,6 +162,7 @@ function RoomBackedWhiteboardWorkspace(props: CollaborativeWhiteboardProps) {
       selfCollaborator={selfCollaborator}
       onCanvasChange={handleCanvasChange}
       onPointerUpdate={handlePointerUpdate}
+      onRestoreScene={restoreScene}
       saveState={saveState}
       lastSavedText={lastSavedText}
     />
@@ -205,6 +209,7 @@ function StandaloneWhiteboardWorkspace(props: CollaborativeWhiteboardProps) {
       selfCollaborator={selfCollaborator}
       onCanvasChange={() => {}}
       onPointerUpdate={() => {}}
+      onRestoreScene={(elements) => excalidrawAPIRef.current?.updateScene({ elements })}
       saveState={saveState}
       lastSavedText={lastSavedText}
     />
@@ -237,6 +242,7 @@ interface WhiteboardWorkspaceLayoutProps extends CollaborativeWhiteboardProps {
     pointer: { x: number; y: number; tool: "pointer" | "laser" };
     button: "down" | "up";
   }) => void;
+  onRestoreScene?: (elements: readonly ExcalidrawElement[]) => void;
   saveState: "idle" | "saving" | "saved" | "error";
   lastSavedText: string;
 }
@@ -260,6 +266,8 @@ function WhiteboardWorkspaceLayout({
   saveState,
   lastSavedText,
   currentUser,
+  onRestoreScene,
+  currentRevision: propRevision,
 }: WhiteboardWorkspaceLayoutProps) {
   const canEdit = effectiveRole !== "VIEWER";
   const canAdmin = effectiveRole === "OWNER" || effectiveRole === "ADMIN";
@@ -270,6 +278,23 @@ function WhiteboardWorkspaceLayout({
   // Discussion / Comments state
   const [isCommentsOpen, setIsCommentsOpen] = useState(false);
   const [commentCount, setCommentCount] = useState<number | null>(null);
+
+  // Version history state
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [currentRevision, setCurrentRevision] = useState(propRevision ?? 1);
+
+  const handleRestoreWhiteboard = useCallback(
+    async (snapshotData: Record<string, unknown>, newTitle?: string) => {
+      const elements = (snapshotData.elements as readonly ExcalidrawElement[]) || [];
+      onRestoreScene?.(elements);
+
+      if (newTitle && newTitle.trim()) {
+        setTitle(newTitle.trim());
+      }
+      setCurrentRevision((prev) => prev + 1);
+    },
+    [onRestoreScene]
+  );
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -658,6 +683,18 @@ function WhiteboardWorkspaceLayout({
               )}
             </Button>
 
+            {/* Version History Toggle Button */}
+            <Button
+              size="sm"
+              variant={isHistoryOpen ? "secondary" : "outline"}
+              className="h-7 text-xs gap-1.5"
+              onClick={() => setIsHistoryOpen(!isHistoryOpen)}
+              data-testid="toggle-history-button"
+            >
+              <History className="h-3 w-3" />
+              <span className="hidden sm:inline">History</span>
+            </Button>
+
             {/* Share Dialog Button */}
             <Dialog open={shareOpen} onOpenChange={setShareOpen}>
               <Button
@@ -834,6 +871,19 @@ function WhiteboardWorkspaceLayout({
           canComment={true}
           effectiveRole={effectiveRole}
           onThreadCountChange={setCommentCount}
+        />
+
+        {/* Version History Drawer */}
+        <VersionHistoryDrawer
+          artifactId={whiteboardId}
+          artifactType="WHITEBOARD"
+          canEdit={canEdit}
+          currentTitle={title}
+          currentRevision={currentRevision}
+          getCurrentSnapshot={() => ({ elements: excalidrawAPIRef.current?.getSceneElementsIncludingDeleted() || [] })}
+          onRestore={handleRestoreWhiteboard}
+          isOpen={isHistoryOpen}
+          onClose={() => setIsHistoryOpen(false)}
         />
       </div>
     </TooltipProvider>

@@ -26,6 +26,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import type { JSONContent } from "@tiptap/core";
 import {
   ArrowLeft,
+  History,
   Share2,
   Bold,
   Italic,
@@ -91,6 +92,7 @@ import {
   type SlashCommandDefinition,
 } from "./editor-extensions";
 import { ArtifactDiscussionPanel } from "@/components/comments/artifact-discussion-panel";
+import { VersionHistoryDrawer } from "@/components/versions/version-history-drawer";
 
 export interface CollaborativeDocumentProps {
   documentId: string;
@@ -103,6 +105,7 @@ export interface CollaborativeDocumentProps {
   authorName: string;
   updatedAtIso: string;
   initialSnapshot?: JSONContent | null;
+  currentRevision?: number;
   liveblocksConfigured: boolean;
   isDemoMode?: boolean;
   currentUser?: {
@@ -375,6 +378,7 @@ function RichTextDocumentWorkspace({
   remoteCollaborators,
   initialContent,
   currentUser,
+  currentRevision: propRevision,
 }: RichTextDocumentWorkspaceProps) {
   const canEdit = effectiveRole !== "VIEWER";
   const canAdmin = effectiveRole === "OWNER" || effectiveRole === "ADMIN";
@@ -401,6 +405,8 @@ function RichTextDocumentWorkspace({
   );
   const [showOutline, setShowOutline] = useState(true);
   const [showCommentsDrawer, setShowCommentsDrawer] = useState(false);
+  const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
+  const [currentRevision, setCurrentRevision] = useState(propRevision ?? 1);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -460,6 +466,10 @@ function RichTextDocumentWorkspace({
           body: JSON.stringify({ contentSnapshot: docJson }),
         });
         if (res.ok) {
+          const jsonResult = await res.json().catch(() => ({}));
+          if (typeof jsonResult.data?.currentRevision === "number") {
+            setCurrentRevision(jsonResult.data.currentRevision);
+          }
           setSaveState("saved");
           setLastUpdatedText(
             new Date().toLocaleTimeString([], {
@@ -579,6 +589,25 @@ function RichTextDocumentWorkspace({
       }
     };
   }, []);
+
+  const handleRestoreDocument = useCallback(
+    async (snapshotData: Record<string, unknown>, newTitle?: string) => {
+      if (!editor) return;
+
+      // Applying setContent to Tiptap editor propagates across Yjs/Liveblocks to all room peers
+      editor.commands.setContent(snapshotData as JSONContent);
+      setHeadings(extractHeadingsFromJson(snapshotData as JSONContent));
+
+      if (newTitle && newTitle.trim()) {
+        setTitle(newTitle.trim());
+      }
+
+      setCurrentRevision((prev) => prev + 1);
+      setSaveState("saved");
+      setLastUpdatedText("Just restored");
+    },
+    [editor]
+  );
 
   const filteredSlashCommands = useMemo(
     () => filterSlashCommands(slashQuery),
@@ -998,6 +1027,25 @@ function RichTextDocumentWorkspace({
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
               Contextual Discussions
+            </TooltipContent>
+          </Tooltip>
+
+          {/* Version History Entry Point */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant={showHistoryDrawer ? "secondary" : "ghost"}
+                className="h-7 px-2 text-xs gap-1"
+                onClick={() => setShowHistoryDrawer((v) => !v)}
+                data-testid="toggle-history-button"
+              >
+                <History className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">History</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              Version History & Restore
             </TooltipContent>
           </Tooltip>
 
@@ -1896,6 +1944,19 @@ function RichTextDocumentWorkspace({
           currentUser={currentUser ?? selfCollaborator}
           canComment={true}
           effectiveRole={effectiveRole}
+        />
+
+        {/* Version History Drawer */}
+        <VersionHistoryDrawer
+          artifactId={documentId}
+          artifactType="DOCUMENT"
+          canEdit={canEdit}
+          currentTitle={title}
+          currentRevision={currentRevision}
+          getCurrentSnapshot={() => editor?.getJSON() as Record<string, unknown>}
+          onRestore={handleRestoreDocument}
+          isOpen={showHistoryDrawer}
+          onClose={() => setShowHistoryDrawer(false)}
         />
       </div>
     </div>

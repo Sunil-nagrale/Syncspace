@@ -77,11 +77,11 @@ export default async function WhiteboardDetailPage({
       },
     });
 
-    const latestVersion = result.artifact.versions?.[0];
+    const rawSnapshot =
+      result.artifact.currentSnapshot ?? result.artifact.versions?.[0]?.snapshotData;
     const initialSnapshot =
-      latestVersion?.snapshotData &&
-      typeof latestVersion.snapshotData === "object"
-        ? (latestVersion.snapshotData as unknown as WhiteboardSnapshotData)
+      rawSnapshot && typeof rawSnapshot === "object"
+        ? (rawSnapshot as unknown as WhiteboardSnapshotData)
         : null;
 
     return (
@@ -102,6 +102,7 @@ export default async function WhiteboardDetailPage({
         }
         updatedAtIso={result.artifact.updatedAt.toISOString()}
         initialSnapshot={initialSnapshot}
+        currentRevision={result.artifact.currentRevision}
         liveblocksConfigured={liveblocksConfigured}
         isDemoMode={false}
         currentUser={

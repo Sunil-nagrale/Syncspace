@@ -78,11 +78,11 @@ export default async function DocumentDetailPage({
       },
     });
 
-    const latestVersion = result.artifact.versions?.[0];
+    const rawSnapshot =
+      result.artifact.currentSnapshot ?? result.artifact.versions?.[0]?.snapshotData;
     const initialSnapshot =
-      latestVersion?.snapshotData &&
-      typeof latestVersion.snapshotData === "object"
-        ? (latestVersion.snapshotData as unknown as JSONContent)
+      rawSnapshot && typeof rawSnapshot === "object"
+        ? (rawSnapshot as unknown as JSONContent)
         : null;
 
     return (
@@ -103,6 +103,7 @@ export default async function DocumentDetailPage({
         }
         updatedAtIso={result.artifact.updatedAt.toISOString()}
         initialSnapshot={initialSnapshot}
+        currentRevision={result.artifact.currentRevision}
         liveblocksConfigured={liveblocksConfigured}
         isDemoMode={false}
         currentUser={

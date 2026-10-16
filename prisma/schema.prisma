@@ -224,6 +224,9 @@ model Artifact {
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
+  currentSnapshot  Json?
+  currentRevision  Int          @default(1)
+
   permissions ArtifactPermission[]
   versions    ArtifactVersion[]
   attachments    Attachment[]
@@ -262,19 +265,22 @@ model ArtifactPermission {
 // =============================================================================
 
 model ArtifactVersion {
-  id            String   @id @default(cuid())
-  artifactId    String
-  artifact      Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
-  versionNumber Int
-  title         String
-  snapshotData  Json
-  changeSummary String?
-  createdById   String
-  createdBy     User     @relation("VersionCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
-  createdAt     DateTime @default(now())
+  id                  String   @id @default(cuid())
+  artifactId          String
+  artifact            Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  versionNumber       Int
+  title               String
+  snapshotData        Json
+  changeSummary       String?
+  source              String   @default("AUTOMATIC")
+  restoredFromVersion Int?
+  createdById         String
+  createdBy           User     @relation("VersionCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt           DateTime @default(now())
 
   @@unique([artifactId, versionNumber])
   @@index([artifactId, createdAt])
+  @@index([artifactId, versionNumber])
   @@map("artifact_version")
 }
 

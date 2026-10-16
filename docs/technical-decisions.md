@@ -318,3 +318,11 @@ Collaborative documents and whiteboards require contextual discussions, review t
 8. **Universal Artifact Discussion Panel**:
    - A unified responsive discussion panel (`ArtifactDiscussionPanel`) is integrated into both the document editor (`/app/documents/[documentId]`) and the whiteboard editor (`/app/whiteboards/[boardId]`).
    - Features cursor progression ("Load more discussions" and "Load more replies"), resolution audit history drawer, filtering by Open, Resolved, and All threads, inline reply composers, emoji reaction pickers, and live counts.
+
+9. **Artifact Version History and Safe Restoration (Phase 9A)**:
+   - **Decoupled Autosave vs Historical Snapshots**: Continuous collaborative updates persist to `Artifact.currentSnapshot` with incrementing `Artifact.currentRevision`. Checkpoints are explicitly captured into immutable `ArtifactVersion` rows manually or on periodic intervals without mutating or resetting historical records.
+   - **Dual Modality Support**: Full validation and preview support for both `DOCUMENT` (Tiptap ProseMirror JSON schema) and `WHITEBOARD` (Excalidraw scene elements + appState/files) under a 5MB payload limit.
+   - **Conflict-Safe Restoration**: `POST /api/artifacts/[artifactId]/versions/[versionId]/restore` enforces optimistic concurrency via `expectedRevision`. If the artifact revision changed while inspecting history, a 409 Conflict is returned, prompting the user with a Refresh History action.
+   - **Pre-Restore Safety & Displaced State Preservation**: Before replacing active state, if `currentSnapshot` has changes not captured in the latest version, a `RESTORE_RECOVERY` checkpoint is atomically created so no edits are ever lost.
+   - **Multiplayer Propagation**: Restoring immediately dispatches content updates into the collaborative live session: `editor.commands.setContent(snapshotData)` updates Yjs/Liveblocks for documents, and `restoreScene` dispatches Liveblocks storage mutations for Excalidraw whiteboards.
+   - **Read-Only Snapshot Previews**: Users can inspect any historical version with full metadata in a dedicated modal without mutating the live editor canvas or triggering state updates.

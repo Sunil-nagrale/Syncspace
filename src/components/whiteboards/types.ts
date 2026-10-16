@@ -25,6 +25,7 @@ export interface CollaborativeWhiteboardProps {
     image?: string | null;
   } | null;
   initialSnapshot?: WhiteboardSnapshotData | null;
+  currentRevision?: number;
   isDemoMode?: boolean;
   liveblocksConfigured?: boolean;
 }

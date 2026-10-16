@@ -378,3 +378,48 @@ export async function resolveEffectivePermission(
 - `OWNER`, `ADMIN`, `EDITOR`: `session.allow(room, ["room:write"])`
 - `VIEWER`: `session.allow(room, ["room:read", "room:presence:write"])`
 - `DENIED`: Request rejected with HTTP 403 Forbidden.
+
+---
+
+## 8. Artifact Version History and Restoration Model (Phase 9A)
+
+### Overview
+Version history in SyncSpace decouples continuous autosaving from immutable historical snapshots. Routine collaborative typing modifies `Artifact.currentSnapshot` and increments `Artifact.currentRevision` without mutating or overwriting historical `ArtifactVersion` records.
+
+### Schema Additions
+
+```prisma
+model Artifact {
+  id              String            @id @default(cuid())
+  // ... existing fields ...
+  currentSnapshot Json?             // Durable snapshot of the current state
+  currentRevision Int               @default(1) // Monotonically increasing revision counter for optimistic concurrency
+  versions        ArtifactVersion[]
+}
+
+model ArtifactVersion {
+  id                  String   @id @default(cuid())
+  artifactId          String
+  artifact            Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  versionNumber       Int      // Sequential monotonic counter per artifact
+  title               String
+  snapshotData        Json     // Immutable full state snapshot (Tiptap ProseMirror JSON or Excalidraw scene)
+  changeSummary       String?
+  source              String   @default("AUTOMATIC") // AUTOMATIC, MANUAL, RESTORED, RESTORE_RECOVERY
+  restoredFromVersion Int?     // References the historical versionNumber when source is RESTORED
+  createdById         String
+  createdBy           User     @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt           DateTime @default(now())
+
+  @@unique([artifactId, versionNumber])
+  @@index([artifactId, createdAt])
+  @@index([artifactId, versionNumber])
+  @@index([createdById])
+}
+```
+
+### Safety & Concurrency Principles
+1. **Immutable Snapshots**: Once created, `ArtifactVersion` rows are read-only and never updated or erased by routine edits or restores.
+2. **Optimistic Concurrency**: Restore operations accept `expectedRevision`. If the artifact's current revision does not match `expectedRevision`, the server rejects with HTTP 409 Conflict.
+3. **Displaced State Preservation**: If restoring a version when the current active state contains unsaved changes differing from the latest version, a `RESTORE_RECOVERY` checkpoint is atomically created before restoration.
+4. **Monotonic Restoration**: Restoring creates a new `RESTORED` version entry with sequential `versionNumber = max(versionNumber) + 1` and `restoredFromVersion` linking to the restored source, preserving a clear timeline audit trail.
