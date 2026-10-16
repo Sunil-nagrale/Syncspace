@@ -184,8 +184,12 @@ export function useWhiteboardSync(
         lastSyncedVersionsRef.current.set(el.id, el.version);
       }
 
-      if (canEdit) {
-        restoreStorageElements(restoredElements);
+      if (canEdit && elementsMap !== null && elementsMap !== undefined) {
+        try {
+          restoreStorageElements(restoredElements);
+        } catch {
+          // Liveblocks storage not yet loaded
+        }
       }
 
       setTimeout(() => {
@@ -195,7 +199,7 @@ export function useWhiteboardSync(
       setSaveState("saved");
       setLastSavedText("Just restored");
     },
-    [excalidrawAPIRef, canEdit, restoreStorageElements]
+    [excalidrawAPIRef, canEdit, restoreStorageElements, elementsMap]
   );
 
   // Initial scene hydration from Liveblocks Storage or PostgreSQL snapshot
@@ -232,8 +236,12 @@ export function useWhiteboardSync(
         }
 
         // If authorized editor, seed Liveblocks storage with the initial snapshot
-        if (canEdit) {
-          updateStorageElements(initialEls);
+        if (canEdit && elementsMap !== null && elementsMap !== undefined) {
+          try {
+            updateStorageElements(initialEls);
+          } catch {
+            // Liveblocks storage not yet loaded
+          }
         }
 
         setTimeout(() => {
@@ -313,11 +321,17 @@ export function useWhiteboardSync(
       }
 
       if (mutatedElements.length > 0) {
-        updateStorageElements(mutatedElements);
+        if (elementsMap !== null && elementsMap !== undefined) {
+          try {
+            updateStorageElements(mutatedElements);
+          } catch {
+            // Liveblocks storage not yet loaded
+          }
+        }
         schedulePostgresSnapshot(elements);
       }
     },
-    [canEdit, updateStorageElements, schedulePostgresSnapshot]
+    [canEdit, updateStorageElements, schedulePostgresSnapshot, elementsMap]
   );
 
   // Handle local pointer movements for ephemeral presence (laser / cursor)

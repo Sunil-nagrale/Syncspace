@@ -302,8 +302,10 @@ function WhiteboardWorkspaceLayout({
       if (params.get("thread")) {
         setIsCommentsOpen(true);
       }
+      (window as unknown as { __GET_SCENE_ELEMENTS__?: () => readonly ExcalidrawElement[] }).__GET_SCENE_ELEMENTS__ = () =>
+        excalidrawAPIRef.current?.getSceneElementsIncludingDeleted() || [];
     }
-  }, []);
+  }, [excalidrawAPIRef]);
 
   // Share & Permissions modal state
   const [shareOpen, setShareOpen] = useState(false);

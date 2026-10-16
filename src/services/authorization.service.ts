@@ -4,6 +4,7 @@ import {
   WorkspaceMember,
   Artifact,
   Project,
+  Prisma,
 } from "@prisma/client";
 
 export class AuthorizationError extends Error {
@@ -185,6 +186,123 @@ export class AuthorizationService {
     }
 
     // Check action against effective role
+    if (requiredAction === "ADMIN") {
+      if (
+        (membership.role !== "OWNER" && membership.role !== "ADMIN") ||
+        effectiveRole === "VIEWER"
+      ) {
+        throw new AuthorizationError(
+          "Admin privileges required for this action.",
+          403
+        );
+      }
+    }
+
+    if (requiredAction === "EDIT" && effectiveRole === "VIEWER") {
+      throw new AuthorizationError(
+        "Edit permission required for this artifact.",
+        403
+      );
+    }
+
+    return {
+      artifact,
+      membership,
+      effectiveRole,
+    };
+  }
+
+  /**
+   * Enforces and revalidates effective artifact access inside a PostgreSQL transaction
+   * using row-level locking (FOR UPDATE on artifact, FOR SHARE on workspace_member & artifact_permission).
+   * Guarantees that concurrent membership revocations, role changes, or permission overrides (NONE)
+   * cannot race past the authorization check.
+   */
+  static async requireArtifactAccessTx(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    artifactId: string,
+    requiredAction: "VIEW" | "EDIT" | "ADMIN" = "VIEW"
+  ): Promise<{
+    artifact: {
+      id: string;
+      workspaceId: string;
+      type: "DOCUMENT" | "WHITEBOARD";
+      title: string;
+      currentSnapshot: unknown;
+      currentRevision: number;
+      isArchived: boolean;
+    };
+    membership: {
+      id: string;
+      role: WorkspaceRole;
+    };
+    effectiveRole: "OWNER" | "ADMIN" | "EDITOR" | "VIEWER";
+  }> {
+    if (!userId) {
+      throw new AuthorizationError("Authentication required.", 401);
+    }
+
+    // 1. Lock and validate artifact row
+    const lockedArtifacts = await tx.$queryRaw<
+      Array<{
+        id: string;
+        workspaceId: string;
+        type: "DOCUMENT" | "WHITEBOARD";
+        title: string;
+        currentSnapshot: unknown;
+        currentRevision: number;
+        isArchived: boolean;
+      }>
+    >`SELECT id, "workspaceId", type, title, "currentSnapshot", "currentRevision", "isArchived" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
+
+    if (!lockedArtifacts || lockedArtifacts.length === 0 || lockedArtifacts[0].isArchived) {
+      throw new NotFoundError("Artifact not found.");
+    }
+
+    const artifact = lockedArtifacts[0];
+
+    // 2. Lock and validate active workspace membership
+    const members = await tx.$queryRaw<
+      Array<{
+        id: string;
+        role: WorkspaceRole;
+      }>
+    >`SELECT id, role FROM workspace_member WHERE "workspaceId" = ${artifact.workspaceId} AND "userId" = ${userId} FOR SHARE`;
+
+    if (!members || members.length === 0) {
+      throw new NotFoundError("Workspace not found or access denied.");
+    }
+
+    const membership = members[0];
+
+    // 3. Lock and validate explicit artifact permission overrides
+    const permissions = await tx.$queryRaw<
+      Array<{
+        id: string;
+        role: string;
+      }>
+    >`SELECT id, role FROM artifact_permission WHERE "artifactId" = ${artifactId} AND "userId" = ${userId} FOR SHARE`;
+
+    const override = permissions && permissions.length > 0 ? permissions[0] : null;
+    let effectiveRole: "OWNER" | "ADMIN" | "EDITOR" | "VIEWER" = membership.role;
+
+    if (override) {
+      if (override.role === "NONE") {
+        throw new AuthorizationError(
+          "Access to this artifact has been explicitly revoked.",
+          403
+        );
+      } else if (override.role === "VIEWER") {
+        effectiveRole = "VIEWER";
+      } else if (override.role === "EDITOR") {
+        if (membership.role === "VIEWER") {
+          effectiveRole = "EDITOR";
+        }
+      }
+    }
+
+    // 4. Validate required action
     if (requiredAction === "ADMIN") {
       if (
         (membership.role !== "OWNER" && membership.role !== "ADMIN") ||

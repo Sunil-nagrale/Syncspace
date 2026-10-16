@@ -621,4 +621,199 @@ describe("Artifact Version History & Restore PostgreSQL Integration Tests", () =
     expect(versionsAfter.some((v) => v.source === "RESTORE_RECOVERY")).toBe(false);
     expect(versionsAfter.some((v) => v.source === "RESTORED")).toBe(false);
   });
+
+  it("11. Restore rejected with NotFoundError when actor membership was revoked", async () => {
+    const { owner, editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(owner.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Membership Revoked Restore RFC",
+    });
+
+    const v1 = await VersionService.createCheckpoint(owner.id, doc.id, {
+      title: "V1 Base",
+      snapshotData: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "V1" }] }] },
+      source: "MANUAL",
+    });
+
+    const docBefore = await prisma.artifact.findUnique({ where: { id: doc.id } });
+
+    // Revoke editor's workspace membership
+    await prisma.workspaceMember.delete({
+      where: {
+        workspaceId_userId: {
+          workspaceId: workspace.id,
+          userId: editor.id,
+        },
+      },
+    });
+
+    // Attempting restore fails inside transaction with NotFoundError (IDOR safe)
+    await expect(
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, {
+        expectedRevision: docBefore!.currentRevision,
+      })
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("12. Restore rejected with AuthorizationError (403) when explicit NONE override is set", async () => {
+    const { owner, editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(owner.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Explicit NONE Override Restore RFC",
+    });
+
+    const v1 = await VersionService.createCheckpoint(owner.id, doc.id, {
+      title: "V1 Base",
+      snapshotData: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "V1" }] }] },
+      source: "MANUAL",
+    });
+
+    const docBefore = await prisma.artifact.findUnique({ where: { id: doc.id } });
+
+    // Owner sets explicit NONE override for editor
+    await ArtifactService.setArtifactPermission(owner.id, doc.id, editor.id, "NONE");
+
+    // Attempting restore fails with 403 AuthorizationError
+    await expect(
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, {
+        expectedRevision: docBefore!.currentRevision,
+      })
+    ).rejects.toThrow(AuthorizationError);
+  });
+
+  it("13. Checkpoint creation rejected after membership revocation or demotion to VIEWER", async () => {
+    const { owner, editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(owner.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Role Demotion Checkpoint RFC",
+    });
+
+    // 1. Demote editor to VIEWER
+    await prisma.workspaceMember.update({
+      where: {
+        workspaceId_userId: {
+          workspaceId: workspace.id,
+          userId: editor.id,
+        },
+      },
+      data: { role: "VIEWER" },
+    });
+
+    // Checkpoint rejected with 403
+    await expect(
+      VersionService.createCheckpoint(editor.id, doc.id, {
+        title: "Viewer Checkpoint Attempt",
+        snapshotData: { type: "doc", content: [] },
+      })
+    ).rejects.toThrow(AuthorizationError);
+
+    // 2. Remove member completely
+    await prisma.workspaceMember.delete({
+      where: {
+        workspaceId_userId: {
+          workspaceId: workspace.id,
+          userId: editor.id,
+        },
+      },
+    });
+
+    // Checkpoint rejected with NotFoundError
+    await expect(
+      VersionService.createCheckpoint(editor.id, doc.id, {
+        title: "Non-member Checkpoint Attempt",
+        snapshotData: { type: "doc", content: [] },
+      })
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("14. Concurrent revocation vs restore/checkpoint safely serializes with transaction lock", async () => {
+    const { owner, editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(owner.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Concurrent Revocation Race RFC",
+    });
+
+    const v1 = await VersionService.createCheckpoint(owner.id, doc.id, {
+      title: "V1 Base",
+      snapshotData: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "V1" }] }] },
+      source: "MANUAL",
+    });
+
+    const docBefore = await prisma.artifact.findUnique({ where: { id: doc.id } });
+
+    // Concurrently trigger revocation of editor AND restore attempt by editor
+    const results = await Promise.allSettled([
+      prisma.$transaction(async (tx) => {
+        await tx.workspaceMember.delete({
+          where: {
+            workspaceId_userId: {
+              workspaceId: workspace.id,
+              userId: editor.id,
+            },
+          },
+        });
+      }),
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, {
+        expectedRevision: docBefore!.currentRevision,
+      }),
+    ]);
+
+    const revocationResult = results[0];
+    const restoreResult = results[1];
+
+    expect(revocationResult.status).toBe("fulfilled");
+    // The restore result was either completed before revocation locked the row, or failed with NotFoundError after revocation committed
+    if (restoreResult.status === "rejected") {
+      expect(
+        restoreResult.reason instanceof NotFoundError ||
+        restoreResult.reason instanceof AuthorizationError
+      ).toBe(true);
+    } else {
+      expect(restoreResult.value.success).toBe(true);
+    }
+  });
+
+  it("15. Continued successful mutations and checkpoint creation for authorized editors", async () => {
+    const { owner, editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(owner.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Authorized Continuation RFC",
+    });
+
+    // Editor creates checkpoint (increments revision to 2)
+    const cp1 = await VersionService.createCheckpoint(editor.id, doc.id, {
+      title: "Authorized Checkpoint 1",
+      snapshotData: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Initial text" }] }] },
+    });
+    expect(cp1.versionNumber).toBe(1);
+
+    // Editor updates artifact (increments revision to 3)
+    const updated = await ArtifactService.updateArtifact(editor.id, doc.id, {
+      contentSnapshot: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Updated text" }] }] },
+    });
+    expect(updated.currentRevision).toBe(3);
+
+    // Editor restores checkpoint 1 (increments revision to 4)
+    const restoreRes = await VersionService.restoreVersion(editor.id, doc.id, cp1.id, {
+      expectedRevision: 3,
+    });
+    expect(restoreRes.success).toBe(true);
+    expect(restoreRes.restoredVersion.versionNumber).toBe(3);
+    expect(restoreRes.currentRevision).toBe(4);
+
+    // Verify artifact reflects restored snapshot and bumped revision
+    const docAfter = await prisma.artifact.findUnique({ where: { id: doc.id } });
+    expect(docAfter?.currentRevision).toBe(4);
+    expect(docAfter?.currentSnapshot).toEqual(cp1.snapshotData);
+  });
 });

@@ -152,11 +152,13 @@ test.describe("SyncSpace Phase 5 — Collaborative Rich-Text Document Editor & R
 
     // Insert a Heading 1 via Toolbar and type heading text
     await ownerPage.getByTestId("toolbar-h1").click();
+    await editorCanvas.focus();
     await ownerPage.keyboard.type("Zero-Trust Synchronization Guarantees");
     await ownerPage.keyboard.press("Enter");
 
     // Type body text with Bold formatting
     await ownerPage.getByTestId("toolbar-bold").click();
+    await editorCanvas.focus();
     await ownerPage.keyboard.type("Deterministic Convergence:");
     await ownerPage.getByTestId("toolbar-bold").click();
     await ownerPage.keyboard.type(

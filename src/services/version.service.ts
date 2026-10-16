@@ -251,19 +251,14 @@ export class VersionService {
       attempt++;
       try {
         const created = await prisma.$transaction(async (tx) => {
-          // Serialize operations for this artifact using row-level locking
-          const lockedArtifacts = await tx.$queryRaw<Array<{
-            id: string;
-            title: string;
-            workspaceId: string;
-            currentRevision: number;
-          }>>`SELECT id, title, "workspaceId", "currentRevision" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
-
-          if (!lockedArtifacts || lockedArtifacts.length === 0) {
-            throw new NotFoundError("Artifact not found.");
-          }
-
-          const lockedArtifact = lockedArtifacts[0];
+          // Transactionally lock artifact and re-validate active workspace membership, role, and permission overrides
+          const { artifact: lockedArtifact } =
+            await AuthorizationService.requireArtifactAccessTx(
+              tx,
+              userId,
+              artifactId,
+              "EDIT"
+            );
 
           const maxRecord = await tx.artifactVersion.findFirst({
             where: { artifactId },
@@ -409,27 +404,14 @@ export class VersionService {
       attempt++;
       try {
         const result = await prisma.$transaction(async (tx) => {
-          // 1. Lock the artifact row using PostgreSQL FOR UPDATE
-          const lockedArtifacts = await tx.$queryRaw<
-            Array<{
-              id: string;
-              workspaceId: string;
-              type: "DOCUMENT" | "WHITEBOARD";
-              title: string;
-              currentSnapshot: unknown;
-              currentRevision: number;
-              isArchived: boolean;
-            }>
-          >`SELECT id, "workspaceId", type, title, "currentSnapshot", "currentRevision", "isArchived" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
-
-          if (!lockedArtifacts || lockedArtifacts.length === 0) {
-            throw new NotFoundError("Artifact not found.");
-          }
-
-          const lockedArtifact = lockedArtifacts[0];
-          if (lockedArtifact.isArchived) {
-            throw new NotFoundError("Artifact not found.");
-          }
+          // 1. Transactionally lock artifact, verify active membership, role, and permission overrides
+          const { artifact: lockedArtifact } =
+            await AuthorizationService.requireArtifactAccessTx(
+              tx,
+              userId,
+              artifactId,
+              "EDIT"
+            );
 
           // 2. Atomic optimistic concurrency check: verify currentRevision matches expectedRevision
           if (lockedArtifact.currentRevision !== options.expectedRevision) {

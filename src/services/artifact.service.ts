@@ -2,7 +2,6 @@ import { prisma } from "@/lib/prisma";
 import {
   AuthorizationService,
   AuthorizationError,
-  NotFoundError,
 } from "./authorization.service";
 import { computeSnapshotHash } from "./version.service";
 import { Artifact, ArtifactType } from "@prisma/client";
@@ -258,17 +257,12 @@ export class ArtifactService {
         attempt++;
         try {
           updated = await prisma.$transaction(async (tx) => {
-            const lockedArtifacts = await tx.$queryRaw<Array<{
-              id: string;
-              title: string;
-              workspaceId: string;
-              currentRevision: number;
-              currentSnapshot: unknown;
-            }>>`SELECT id, title, "workspaceId", "currentRevision", "currentSnapshot" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
-
-            if (!lockedArtifacts || lockedArtifacts.length === 0) {
-              throw new NotFoundError("Artifact not found.");
-            }
+            await AuthorizationService.requireArtifactAccessTx(
+              tx,
+              userId,
+              artifactId,
+              "EDIT"
+            );
 
             const updatedArt = await tx.artifact.update({
               where: { id: artifactId },
@@ -352,20 +346,29 @@ export class ArtifactService {
         throw new Error("Failed to persist snapshot after concurrent attempts.");
       }
     } else {
-      updated = await prisma.artifact.update({
-        where: { id: artifactId },
-        data: {
-          ...(input.title !== undefined && input.title.trim().length > 0
-            ? { title: input.title.trim() }
-            : {}),
-          ...(input.description !== undefined ? { description: input.description.trim() } : {}),
-          ...(input.icon !== undefined ? { icon: input.icon } : {}),
-          ...(input.coverImageUrl !== undefined ? { coverImageUrl: input.coverImageUrl } : {}),
-          ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
-          ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
-          ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
-          updatedById: userId,
-        },
+      updated = await prisma.$transaction(async (tx) => {
+        await AuthorizationService.requireArtifactAccessTx(
+          tx,
+          userId,
+          artifactId,
+          "EDIT"
+        );
+
+        return tx.artifact.update({
+          where: { id: artifactId },
+          data: {
+            ...(input.title !== undefined && input.title.trim().length > 0
+              ? { title: input.title.trim() }
+              : {}),
+            ...(input.description !== undefined ? { description: input.description.trim() } : {}),
+            ...(input.icon !== undefined ? { icon: input.icon } : {}),
+            ...(input.coverImageUrl !== undefined ? { coverImageUrl: input.coverImageUrl } : {}),
+            ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
+            ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
+            ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+            updatedById: userId,
+          },
+        });
       });
     }
 
@@ -444,31 +447,41 @@ export class ArtifactService {
       "VIEWER"
     );
 
-    if (role === "INHERIT") {
-      await prisma.artifactPermission.deleteMany({
+    return prisma.$transaction(async (tx) => {
+      // Re-validate admin access and acquire row-level lock on artifact so permission mutations serialize with restore/checkpoint/update
+      await AuthorizationService.requireArtifactAccessTx(
+        tx,
+        actorUserId,
+        artifactId,
+        "ADMIN"
+      );
+
+      if (role === "INHERIT") {
+        await tx.artifactPermission.deleteMany({
+          where: {
+            artifactId,
+            userId: targetUserId,
+          },
+        });
+        return null;
+      }
+
+      return tx.artifactPermission.upsert({
         where: {
+          artifactId_userId: {
+            artifactId,
+            userId: targetUserId,
+          },
+        },
+        create: {
           artifactId,
           userId: targetUserId,
+          role,
+        },
+        update: {
+          role,
         },
       });
-      return null;
-    }
-
-    return prisma.artifactPermission.upsert({
-      where: {
-        artifactId_userId: {
-          artifactId,
-          userId: targetUserId,
-        },
-      },
-      create: {
-        artifactId,
-        userId: targetUserId,
-        role,
-      },
-      update: {
-        role,
-      },
     });
   }
 }

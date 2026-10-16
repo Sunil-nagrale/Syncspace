@@ -43,12 +43,40 @@ export default function ExcalidrawCanvasInner({
 }: ExcalidrawCanvasInnerProps) {
   const { resolvedTheme } = useTheme();
   const theme = resolvedTheme === "dark" ? THEME.DARK : THEME.LIGHT;
+  const containerRef = React.useRef<HTMLDivElement>(null);
 
   const handleExcalidrawApi = useCallback(
     (api: ExcalidrawImperativeAPI) => {
       excalidrawAPIRef.current = api;
+      if (typeof window !== "undefined") {
+        (window as unknown as { __EXCALIDRAW_API__?: ExcalidrawImperativeAPI }).__EXCALIDRAW_API__ = api;
+        (window as unknown as { __LATEST_ELEMENTS__?: readonly ExcalidrawElement[] }).__LATEST_ELEMENTS__ =
+          api.getSceneElementsIncludingDeleted();
+      }
     },
     [excalidrawAPIRef]
+  );
+
+  const handleCanvasChange = useCallback(
+    (
+      elements: readonly ExcalidrawElement[],
+      appState: AppState,
+      files: BinaryFiles
+    ) => {
+      if (typeof window !== "undefined") {
+        (window as unknown as { __LATEST_ELEMENTS__?: readonly ExcalidrawElement[] }).__LATEST_ELEMENTS__ = elements;
+        if (excalidrawAPIRef.current) {
+          (window as unknown as { __EXCALIDRAW_API__?: ExcalidrawImperativeAPI }).__EXCALIDRAW_API__ =
+            excalidrawAPIRef.current;
+        }
+      }
+      const activeCount = elements.filter((el) => !el.isDeleted).length;
+      if (containerRef.current) {
+        containerRef.current.setAttribute("data-active-count", String(activeCount));
+      }
+      onChange(elements, appState, files);
+    },
+    [onChange, excalidrawAPIRef]
   );
 
   useEffect(() => {
@@ -64,8 +92,10 @@ export default function ExcalidrawCanvasInner({
 
   return (
     <div
+      ref={containerRef}
       className="w-full h-full relative"
       data-testid="excalidraw-canvas-container"
+      data-active-count="0"
     >
       <Excalidraw
         excalidrawAPI={handleExcalidrawApi}
@@ -73,7 +103,7 @@ export default function ExcalidrawCanvasInner({
         viewModeEnabled={viewModeEnabled}
         zenModeEnabled={false}
         gridModeEnabled={false}
-        onChange={onChange}
+        onChange={handleCanvasChange}
         onPointerUpdate={onPointerUpdate}
         UIOptions={{
           canvasActions: {
