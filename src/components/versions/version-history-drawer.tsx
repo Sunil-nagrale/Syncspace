@@ -166,6 +166,15 @@ export function VersionHistoryDrawer({
   const [conflictError, setConflictError] = useState<string | null>(null);
   const [restoreSuccessText, setRestoreSuccessText] = useState<string | null>(null);
 
+  // Live reconciliation state for propagation failure recovery
+  const [pendingReconciliation, setPendingReconciliation] = useState<{
+    snapshotData: Record<string, unknown>;
+    title?: string;
+    versionNumber: number;
+    currentRevision: number;
+  } | null>(null);
+  const [isReconciling, setIsReconciling] = useState<boolean>(false);
+
   // Concurrency tracking revision
   const [activeRevision, setActiveRevision] = useState<number>(currentRevision);
 
@@ -323,24 +332,65 @@ export function VersionHistoryDrawer({
 
       const restoreResult = await res.json();
       if (typeof restoreResult.currentRevision === "number") {
-        setActiveRevision(restoreResult.currentRevision);
+        setActiveRevision((prev) => Math.max(prev, restoreResult.currentRevision));
       }
 
-      // Apply restored state to the active editor/whiteboard live room
-      await onRestore(restoreResult.snapshotData, restoreResult.title);
+      const pending = {
+        snapshotData: restoreResult.snapshotData as Record<string, unknown>,
+        title: restoreResult.title as string | undefined,
+        versionNumber: target.versionNumber,
+        currentRevision: restoreResult.currentRevision as number,
+      };
 
-      setRestoreSuccessText(
-        `Version ${target.versionNumber} restored successfully. Connected collaborators have received the updated state.`
-      );
-      setVersionToRestore(null);
-      setPreviewVersion(null);
-
-      // Refresh history list
-      await fetchVersions();
+      try {
+        // Apply restored state to the active editor/whiteboard live room
+        await onRestore(restoreResult.snapshotData, restoreResult.title);
+        setPendingReconciliation(null);
+        setRestoreSuccessText(
+          `Version ${target.versionNumber} restored successfully. Connected collaborators have received the updated state.`
+        );
+        setVersionToRestore(null);
+        setPreviewVersion(null);
+        await fetchVersions();
+      } catch {
+        // Durable restore committed in PostgreSQL, but live room propagation failed
+        setPendingReconciliation(pending);
+        setVersionToRestore(null);
+        setPreviewVersion(null);
+        await fetchVersions();
+        setErrorMessage(
+          "Durable restore succeeded in database, but applying updates to the live collaboration room failed. Please click 'Reconcile Live State' to sync the active canvas."
+        );
+      }
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : "Failed to restore version.");
     } finally {
       setIsRestoring(false);
+    }
+  };
+
+  // Reconcile live state from pending committed restore without creating duplicate RESTORED versions
+  const handleReconcileLiveState = async () => {
+    if (!pendingReconciliation || isReconciling) return;
+    setIsReconciling(true);
+    try {
+      await onRestore(
+        pendingReconciliation.snapshotData,
+        pendingReconciliation.title
+      );
+      const restoredNum = pendingReconciliation.versionNumber;
+      setPendingReconciliation(null);
+      setErrorMessage(null);
+      setRestoreSuccessText(
+        `Live state successfully reconciled with Version ${restoredNum}.`
+      );
+    } catch (err: unknown) {
+      setErrorMessage(
+        "Failed to reconcile live state: " +
+          (err instanceof Error ? err.message : "Live room unavailable.")
+      );
+    } finally {
+      setIsReconciling(false);
     }
   };
 
@@ -426,6 +476,42 @@ export function VersionHistoryDrawer({
               >
                 <X className="h-3.5 w-3.5" />
               </button>
+            </div>
+          )}
+
+          {pendingReconciliation && (
+            <div
+              className="mx-4 mt-3 p-3 text-xs bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-800 rounded-md flex flex-col gap-2"
+              data-testid="reconciliation-alert"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
+                <div className="flex-1">
+                  Database restored to Version {pendingReconciliation.versionNumber}, but active room update was interrupted.
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleReconcileLiveState}
+                  disabled={isReconciling}
+                  className="h-7 text-xs bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/60 text-amber-900 dark:text-amber-100 border-amber-300"
+                  data-testid="reconcile-live-state-btn"
+                >
+                  {isReconciling ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                      Reconciling...
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="h-3 w-3 mr-1" />
+                      Reconcile Live State
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
           )}
 

@@ -272,7 +272,7 @@ describe("Artifact Version History & Restore PostgreSQL Integration Tests", () =
     ).rejects.toThrow(NotFoundError);
 
     await expect(
-      VersionService.restoreVersion(outsider.id, doc.id, v1.id)
+      VersionService.restoreVersion(outsider.id, doc.id, v1.id, { expectedRevision: 1 })
     ).rejects.toThrow(NotFoundError);
 
     // 2. Viewer CAN list and preview version
@@ -293,7 +293,7 @@ describe("Artifact Version History & Restore PostgreSQL Integration Tests", () =
     ).rejects.toThrow(AuthorizationError);
 
     await expect(
-      VersionService.restoreVersion(viewer.id, doc.id, v1.id)
+      VersionService.restoreVersion(viewer.id, doc.id, v1.id, { expectedRevision: 1 })
     ).rejects.toThrow(AuthorizationError);
 
     // 4. Explicit NONE override blocks access even for workspace editor
@@ -310,7 +310,7 @@ describe("Artifact Version History & Restore PostgreSQL Integration Tests", () =
     ).rejects.toThrow(AuthorizationError);
 
     await expect(
-      VersionService.restoreVersion(editor.id, doc.id, v1.id)
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, { expectedRevision: 1 })
     ).rejects.toThrow(AuthorizationError);
   });
 
@@ -464,11 +464,161 @@ describe("Artifact Version History & Restore PostgreSQL Integration Tests", () =
     });
 
     // Restore back to v1
-    const restoreRes = await VersionService.restoreVersion(editor.id, board.id, v1.id);
+    const beforeRestore = await prisma.artifact.findUnique({ where: { id: board.id } });
+    const restoreRes = await VersionService.restoreVersion(editor.id, board.id, v1.id, {
+      expectedRevision: beforeRestore!.currentRevision,
+    });
     expect(restoreRes.success).toBe(true);
     expect(restoreRes.snapshotData).toEqual(boardV1);
 
     const refreshedBoard = await prisma.artifact.findUnique({ where: { id: board.id } });
     expect(refreshedBoard?.currentSnapshot).toEqual(boardV1);
+  });
+
+  it("8. Concurrently executing restores with identical expectedRevision results in exactly one success and one ConflictError (409)", async () => {
+    const { editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(editor.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Concurrent Restore Race RFC",
+    });
+
+    const v1Content = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "V1 initial architecture" }] }],
+    };
+    const v1 = await VersionService.createCheckpoint(editor.id, doc.id, {
+      title: "V1 Base",
+      snapshotData: v1Content,
+      source: "MANUAL",
+    });
+
+    // Make an edit
+    const v2Content = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "V2 intermediate changes" }] }],
+    };
+    await ArtifactService.updateArtifact(editor.id, doc.id, {
+      contentSnapshot: v2Content,
+    });
+
+    const docBefore = await prisma.artifact.findUnique({ where: { id: doc.id } });
+    const currentRevision = docBefore!.currentRevision;
+
+    // Both clients attempt to restore v1 simultaneously using the exact same expectedRevision
+    const results = await Promise.allSettled([
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, { expectedRevision: currentRevision }),
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, { expectedRevision: currentRevision }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(1);
+
+    // The rejected one must be ConflictError
+    const rejectionReason = (rejected[0] as PromiseRejectedResult).reason;
+    expect(rejectionReason).toBeInstanceOf(ConflictError);
+    expect((rejectionReason as ConflictError).statusCode).toBe(409);
+
+    // Check database consistency: exactly one RESTORED and one RESTORE_RECOVERY version created
+    const versions = await prisma.artifactVersion.findMany({
+      where: { artifactId: doc.id },
+      orderBy: { versionNumber: "asc" },
+    });
+
+    const restoredVersions = versions.filter((v) => v.source === "RESTORED");
+    const recoveryVersions = versions.filter((v) => v.source === "RESTORE_RECOVERY");
+
+    expect(restoredVersions.length).toBe(1);
+    expect(recoveryVersions.length).toBe(1);
+
+    // Version numbers must be strictly sequential without duplicates
+    const versionNumbers = versions.map((v) => v.versionNumber);
+    const uniqueVersionNumbers = Array.from(new Set(versionNumbers));
+    expect(versionNumbers).toEqual(uniqueVersionNumbers);
+  });
+
+  it("9. Concurrently executing manual checkpoints produces unique, monotonically assigned version numbers without duplicate key errors", async () => {
+    const { editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(editor.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Concurrent Checkpoints RFC",
+    });
+
+    // Initial baseline
+    await VersionService.createCheckpoint(editor.id, doc.id, {
+      title: "V1 Base",
+      snapshotData: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "V1" }] }] },
+      source: "MANUAL",
+    });
+
+    // Fire 5 concurrent checkpoint creation calls
+    const promises = Array.from({ length: 5 }).map((_, idx) =>
+      VersionService.createCheckpoint(editor.id, doc.id, {
+        title: `Concurrent Checkpoint ${idx + 2}`,
+        snapshotData: {
+          type: "doc",
+          content: [{ type: "paragraph", content: [{ type: "text", text: `Checkpoint text ${idx + 2}` }] }],
+        },
+        source: "MANUAL",
+      })
+    );
+
+    const createdVersions = await Promise.all(promises);
+    expect(createdVersions.length).toBe(5);
+
+    // All versions in database must be strictly monotonic [1, 2, 3, 4, 5, 6]
+    const allVersions = await prisma.artifactVersion.findMany({
+      where: { artifactId: doc.id },
+      orderBy: { versionNumber: "asc" },
+    });
+
+    expect(allVersions.length).toBe(6);
+    expect(allVersions.map((v) => v.versionNumber)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  it("10. Stale restore rollback verification: failed restore does not commit intermediate RESTORE_RECOVERY records", async () => {
+    const { editor, workspace } = await createTestWorkspaceWithUsers();
+
+    const doc = await ArtifactService.createArtifact(editor.id, {
+      workspaceId: workspace.id,
+      type: "DOCUMENT",
+      title: "Rollback Verification RFC",
+    });
+
+    const v1 = await VersionService.createCheckpoint(editor.id, doc.id, {
+      title: "V1 Initial",
+      snapshotData: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "V1" }] }] },
+      source: "MANUAL",
+    });
+
+    const docInitial = await prisma.artifact.findUnique({ where: { id: doc.id } });
+    const initialRevision = docInitial!.currentRevision;
+
+    // Simulate autosave edit which displaced state and bumped revision
+    await ArtifactService.updateArtifact(editor.id, doc.id, {
+      contentSnapshot: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "V2 Autosave" }] }] },
+    });
+
+    const versionsBefore = await prisma.artifactVersion.findMany({ where: { artifactId: doc.id } });
+    expect(versionsBefore.length).toBe(1);
+
+    // Attempt restore using stale initialRevision
+    await expect(
+      VersionService.restoreVersion(editor.id, doc.id, v1.id, {
+        expectedRevision: initialRevision,
+      })
+    ).rejects.toThrow(ConflictError);
+
+    // Verify database was rolled back: no RESTORE_RECOVERY record exists!
+    const versionsAfter = await prisma.artifactVersion.findMany({ where: { artifactId: doc.id } });
+    expect(versionsAfter.length).toBe(1);
+    expect(versionsAfter.some((v) => v.source === "RESTORE_RECOVERY")).toBe(false);
+    expect(versionsAfter.some((v) => v.source === "RESTORED")).toBe(false);
   });
 });

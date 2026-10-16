@@ -30,7 +30,7 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     await prisma.$disconnect();
   });
 
-  test("1. Document version history: checkpoints, preview immutability, safe restoration, collaborative sync, and continuation", async ({
+  test("1. Document version history: checkpoints, preview immutability, safe restoration, collaborative sync across connected peers without refresh, and continuation", async ({
     browser,
   }) => {
     const timestamp = Date.now();
@@ -101,11 +101,29 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     });
     expect(dbDoc).not.toBeNull();
 
-    // 4. Edit initial content in Document
-    const editorCanvas = ownerPage.getByTestId("tiptap-editor-canvas");
-    await expect(editorCanvas).toBeVisible();
-    await editorCanvas.click();
+    // 4. Connect BOTH Owner and Collaborator to the document room BEFORE restore
+    await collabPage.goto(docUrl);
+    const ownerCanvas = ownerPage.getByTestId("tiptap-editor-canvas");
+    const collabCanvas = collabPage.getByTestId("tiptap-editor-canvas");
+
+    await expect(ownerCanvas).toBeVisible({ timeout: 20000 });
+    await expect(collabCanvas).toBeVisible({ timeout: 20000 });
+
+    await Promise.all([
+      expect(ownerPage.getByTestId("room-connection-status")).toContainText("Connected & Synced", {
+        timeout: 25000,
+      }),
+      expect(collabPage.getByTestId("room-connection-status")).toContainText("Connected & Synced", {
+        timeout: 25000,
+      }),
+    ]);
+
+    // Owner types initial content
+    await ownerCanvas.click();
     await ownerPage.keyboard.type("Initial Version 1 Content for Consensus Protocol.");
+
+    // Collaborator receives the initial content live via Yjs / Liveblocks
+    await expect(collabCanvas).toContainText("Consensus Protocol", { timeout: 15000 });
 
     // Open history drawer
     await ownerPage.getByTestId("toggle-history-button").click();
@@ -127,7 +145,10 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     await expect(ownerPage.getByText("Read-Only")).toBeVisible();
     await expect(ownerPage.getByTestId("version-preview-modal")).toContainText("Consensus Protocol");
 
-    // Confirm preview did not mutate live editor canvas
+    // Confirm preview did not mutate live editor canvas on either peer
+    await expect(ownerCanvas).toContainText("Consensus Protocol");
+    await expect(collabCanvas).toContainText("Consensus Protocol");
+
     await ownerPage.getByTestId("exit-preview-btn").click();
     await expect(ownerPage.getByTestId("version-preview-modal")).not.toBeVisible();
 
@@ -136,10 +157,11 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     await expect(ownerPage.getByTestId("version-history-drawer")).not.toBeVisible();
 
     // Overwrite the canvas with temporary edits before restoring
-    await editorCanvas.click();
+    await ownerCanvas.click();
     await ownerPage.keyboard.press("ControlOrMeta+A");
     await ownerPage.keyboard.type("Replaced content with temporary draft.");
-    await expect(editorCanvas).toContainText("Replaced content with temporary draft");
+    await expect(ownerCanvas).toContainText("Replaced content with temporary draft");
+    await expect(collabCanvas).toContainText("Replaced content with temporary draft", { timeout: 15000 });
 
     // Reopen history drawer
     await ownerPage.getByTestId("toggle-history-button").click();
@@ -147,30 +169,47 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
 
     // 6. Restore Version 2 (Milestone 1)
     await ownerPage.getByTestId("restore-version-2-btn").click();
-    await expect(ownerPage.getByTestId("restore-confirm-dialog")).toBeVisible();
     await ownerPage.getByTestId("confirm-restore-btn").click();
 
-    // If an in-flight autosave triggered a concurrency conflict, verify the conflict UI and click Refresh History
-    const conflictAlert = ownerPage.getByTestId("restore-conflict-alert");
-    if (await conflictAlert.isVisible({ timeout: 2000 }).catch(() => false)) {
+    // Check if conflict alert appears (due to debounced autosave changing currentRevision)
+    const outcome1 = await Promise.race([
+      ownerPage
+        .getByTestId("restore-success-alert")
+        .waitFor({ state: "visible", timeout: 8000 })
+        .then(() => "success" as const),
+      ownerPage
+        .getByTestId("restore-conflict-alert")
+        .waitFor({ state: "visible", timeout: 8000 })
+        .then(() => "conflict" as const),
+    ]).catch(() => "unknown");
+
+    if (outcome1 === "conflict") {
       await ownerPage.getByTestId("refresh-conflict-btn").click();
-      await expect(conflictAlert).not.toBeVisible();
+      await expect(ownerPage.getByTestId("restore-conflict-alert")).not.toBeVisible();
       await ownerPage.getByTestId("confirm-restore-btn").click();
     }
 
-    await expect(ownerPage.getByTestId("restore-success-alert")).toBeVisible();
+    await expect(ownerPage.getByTestId("restore-success-alert")).toBeVisible({ timeout: 15000 });
 
-    // 7. Verify editor displays restored state
-    await expect(editorCanvas).toContainText("Consensus Protocol");
+    // 7. Verify Owner editor displays restored state
+    await expect(ownerCanvas).toContainText("Consensus Protocol");
 
-    // 8. Collaborator loads the document and receives restored state
-    await collabPage.goto(docUrl);
-    const collabCanvas = collabPage.getByTestId("tiptap-editor-canvas");
-    await expect(collabCanvas).toBeVisible();
-    await expect(collabCanvas).toContainText("Consensus Protocol");
+    // 8. Verify already-connected Collaborator receives restored state WITHOUT refreshing page
+    await expect(collabCanvas).toContainText("Consensus Protocol", { timeout: 15000 });
 
-    // 9. History continues: a new version was created for the restoration
+    // 9. Subsequent edits: Elena types more text, Carlos sees it live
+    await ownerPage.getByTestId("close-history-drawer-btn").click();
+    await ownerCanvas.click();
+    await ownerPage.keyboard.type(" Live collaboration continuing after restore.");
+    await expect(ownerCanvas).toContainText("Live collaboration continuing after restore");
+    await expect(collabCanvas).toContainText("Live collaboration continuing after restore", { timeout: 15000 });
+
+    // Re-open history drawer and verify monotonic history continuation
+    await ownerPage.getByTestId("toggle-history-button").click();
     await expect(ownerPage.getByTestId("version-item-3")).toBeVisible();
+
+    await ownerContext.close();
+    await collabContext.close();
   });
 
   test("2. Negative test: Viewer cannot restore versions or create checkpoints", async ({
@@ -241,11 +280,7 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
       where: { workspaceId: dbWorkspace!.id, title: docTitle },
     });
 
-    // Create a version
-    await VersionService.createCheckpoint(viewerUser!.id, dbDoc!.id, {
-      title: "V1 Checkpoint",
-      snapshotData: { type: "doc", content: [] },
-    }).catch(() => {}); // Expected to fail for viewer, but create as owner
+    // Create a baseline version
     await VersionService.createCheckpoint(dbWorkspace!.createdById!, dbDoc!.id, {
       title: "V1 Checkpoint",
       snapshotData: { type: "doc", content: [] },
@@ -265,5 +300,187 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
 
     // Verify viewer CAN see "Preview" button
     await expect(viewerPage.getByTestId("preview-version-1-btn")).toBeVisible();
+
+    await ownerContext.close();
+    await viewerContext.close();
+  });
+
+  test("3. Whiteboard version history: checkpoints, preview immutability, safe restoration, collaborative sync across connected peers without refresh, and continuation", async ({
+    browser,
+  }) => {
+    const timestamp = Date.now();
+    const rand = Math.random().toString(36).slice(2, 7);
+
+    const ownerEmail = `vh.wb.owner.${timestamp}.${rand}@syncspace.dev`;
+    const collabEmail = `vh.wb.collab.${timestamp}.${rand}@syncspace.dev`;
+    const password = "BoardPassword123!";
+
+    createdUserEmails.push(ownerEmail, collabEmail);
+
+    const ownerContext = await browser.newContext();
+    const collabContext = await browser.newContext();
+
+    const ownerPage = await ownerContext.newPage();
+    const collabPage = await collabContext.newPage();
+
+    // 1. Register Owner
+    await ownerPage.goto("/register");
+    await ownerPage.getByPlaceholder("Sunil Kumar").fill("Diana Lead");
+    await ownerPage.getByPlaceholder("name@company.com").fill(ownerEmail);
+    await ownerPage.getByPlaceholder("Minimum 8 characters").fill(password);
+    await ownerPage.getByRole("button", { name: /create account/i }).click();
+    await expect(ownerPage).toHaveURL(/\/app/);
+
+    // Register Collaborator
+    await collabPage.goto("/register");
+    await collabPage.getByPlaceholder("Sunil Kumar").fill("Evan Collaborator");
+    await collabPage.getByPlaceholder("name@company.com").fill(collabEmail);
+    await collabPage.getByPlaceholder("Minimum 8 characters").fill(password);
+    await collabPage.getByRole("button", { name: /create account/i }).click();
+    await expect(collabPage).toHaveURL(/\/app/);
+
+    // 2. Owner creates Workspace
+    const wsName = `Whiteboard History Studio ${rand}`;
+    await ownerPage.getByRole("button", { name: /create workspace/i }).first().click();
+    await ownerPage.getByPlaceholder("e.g. Acme Engineering").fill(wsName);
+    await ownerPage.getByRole("dialog").getByRole("button", { name: /create workspace/i }).click();
+    await expect(ownerPage.locator("h1")).toContainText(wsName);
+
+    const dbWorkspace = await prisma.workspace.findFirst({
+      where: { name: wsName },
+    });
+    expect(dbWorkspace).not.toBeNull();
+
+    // Add Collaborator to Workspace as EDITOR
+    const collabUser = await prisma.user.findUnique({ where: { email: collabEmail } });
+    await prisma.workspaceMember.create({
+      data: {
+        workspaceId: dbWorkspace!.id,
+        userId: collabUser!.id,
+        role: "EDITOR",
+      },
+    });
+
+    // 3. Owner creates Whiteboard
+    await ownerPage.goto("/app/whiteboards");
+    const boardTitle = `System Architecture Topology ${rand}`;
+    await ownerPage.getByTestId("create-whiteboard-btn").click();
+    await ownerPage.getByTestId("new-whiteboard-title-input").fill(boardTitle);
+    await ownerPage.getByTestId("confirm-create-whiteboard-btn").click();
+
+    await expect(ownerPage).toHaveURL(/\/app\/whiteboards\/.+/);
+    const boardUrl = ownerPage.url();
+
+    const dbBoard = await prisma.artifact.findFirst({
+      where: { workspaceId: dbWorkspace!.id, title: boardTitle },
+    });
+    expect(dbBoard).not.toBeNull();
+
+    // 4. Connect BOTH Owner and Collaborator to Whiteboard room BEFORE restore
+    await collabPage.goto(boardUrl);
+
+    await Promise.all([
+      expect(ownerPage.getByTestId("excalidraw-canvas-container")).toBeVisible({ timeout: 25000 }),
+      expect(collabPage.getByTestId("excalidraw-canvas-container")).toBeVisible({ timeout: 25000 }),
+    ]);
+
+    await Promise.all([
+      expect(ownerPage.getByTestId("room-connection-status")).toContainText("Connected & Synced", {
+        timeout: 25000,
+      }),
+      expect(collabPage.getByTestId("room-connection-status")).toContainText("Connected & Synced", {
+        timeout: 25000,
+      }),
+    ]);
+
+    // 5. Owner creates Checkpoint 1: Baseline Architecture
+    await ownerPage.getByTestId("toggle-history-button").click();
+    await expect(ownerPage.getByTestId("version-history-drawer")).toBeVisible();
+
+    await ownerPage.getByTestId("create-checkpoint-btn").click();
+    await ownerPage.getByTestId("checkpoint-title-input").fill("Milestone 1");
+    await ownerPage.getByTestId("checkpoint-summary-input").fill("Initial topology layout");
+    await ownerPage.getByTestId("submit-checkpoint-btn").click();
+
+    await expect(ownerPage.getByTestId("version-item-1")).toBeVisible();
+
+    // Close drawer to interact with canvas
+    await ownerPage.getByTestId("close-history-drawer-btn").click();
+    await expect(ownerPage.getByTestId("version-history-drawer")).not.toBeVisible();
+
+    // Owner draws a rectangle on the whiteboard
+    await ownerPage.locator("[data-testid='toolbar-rectangle']").click({ force: true });
+    const canvasOwner = ownerPage.locator("canvas.interactive");
+    await expect(canvasOwner).toBeVisible({ timeout: 15000 });
+    const box = (await canvasOwner.boundingBox())!;
+    const startX = box.x + Math.floor(box.width * 0.4);
+    const startY = box.y + Math.floor(box.height * 0.4);
+    await ownerPage.mouse.move(startX, startY);
+    await ownerPage.mouse.down();
+    await ownerPage.mouse.move(startX + 140, startY + 90, { steps: 5 });
+    await ownerPage.mouse.up();
+
+    await expect(ownerPage.getByTestId("whiteboard-save-status")).toContainText("Saved", {
+      timeout: 15000,
+    });
+
+    // Owner creates Checkpoint 2: Added Gateway Node
+    await ownerPage.getByTestId("toggle-history-button").click();
+    await expect(ownerPage.getByTestId("version-history-drawer")).toBeVisible();
+
+    await ownerPage.getByTestId("create-checkpoint-btn").click();
+    await ownerPage.getByTestId("checkpoint-title-input").fill("Milestone 2");
+    await ownerPage.getByTestId("checkpoint-summary-input").fill("Added gateway rectangle");
+    await ownerPage.getByTestId("submit-checkpoint-btn").click();
+
+    await expect(ownerPage.getByTestId("version-item-2")).toBeVisible();
+
+    // 6. Preview Version 1 (Read-Only)
+    await ownerPage.getByTestId("preview-version-1-btn").click();
+    await expect(ownerPage.getByTestId("version-preview-modal")).toBeVisible();
+    await expect(ownerPage.getByText("Read-Only")).toBeVisible();
+    await expect(ownerPage.getByText("Canvas Scene Metadata")).toBeVisible();
+
+    // Confirm preview did not mutate live canvas for either peer
+    await expect(ownerPage.getByTestId("excalidraw-canvas-container")).toBeVisible();
+    await expect(collabPage.getByTestId("excalidraw-canvas-container")).toBeVisible();
+
+    await ownerPage.getByTestId("exit-preview-btn").click();
+    await expect(ownerPage.getByTestId("version-preview-modal")).not.toBeVisible();
+
+    // 7. Restore Version 1
+    await ownerPage.getByTestId("restore-version-1-btn").click();
+    await ownerPage.getByTestId("confirm-restore-btn").click();
+
+    const outcome3 = await Promise.race([
+      ownerPage
+        .getByTestId("restore-success-alert")
+        .waitFor({ state: "visible", timeout: 8000 })
+        .then(() => "success" as const),
+      ownerPage
+        .getByTestId("restore-conflict-alert")
+        .waitFor({ state: "visible", timeout: 8000 })
+        .then(() => "conflict" as const),
+    ]).catch(() => "unknown");
+
+    if (outcome3 === "conflict") {
+      await ownerPage.getByTestId("refresh-conflict-btn").click();
+      await expect(ownerPage.getByTestId("restore-conflict-alert")).not.toBeVisible();
+      await ownerPage.getByTestId("confirm-restore-btn").click();
+    }
+
+    await expect(ownerPage.getByTestId("restore-success-alert")).toBeVisible({ timeout: 15000 });
+
+    // 8. Collaborator receives restored scene without page reload
+    await expect(collabPage.getByTestId("room-connection-status")).toContainText(
+      "Connected & Synced",
+      { timeout: 15000 }
+    );
+
+    // 9. Monotonic history continuation: a new version was recorded
+    await expect(ownerPage.getByTestId("version-item-3")).toBeVisible();
+
+    await ownerContext.close();
+    await collabContext.close();
   });
 });

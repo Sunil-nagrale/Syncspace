@@ -89,5 +89,5 @@ export const createVersionSchema = z.object({
  * Input schema for restoring an artifact version
  */
 export const restoreVersionSchema = z.object({
-  expectedRevision: z.number().int().min(1).optional(),
+  expectedRevision: z.number().int().min(1, "expectedRevision must be a positive integer"),
 });

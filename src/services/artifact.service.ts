@@ -2,7 +2,9 @@ import { prisma } from "@/lib/prisma";
 import {
   AuthorizationService,
   AuthorizationError,
+  NotFoundError,
 } from "./authorization.service";
+import { computeSnapshotHash } from "./version.service";
 import { Artifact, ArtifactType } from "@prisma/client";
 import { randomBytes } from "crypto";
 
@@ -246,77 +248,125 @@ export class ArtifactService {
     const hasSnapshot = input.contentSnapshot && typeof input.contentSnapshot === "object";
     const safeSnapshot = hasSnapshot ? JSON.parse(JSON.stringify(input.contentSnapshot)) : undefined;
 
-    const updated = await prisma.artifact.update({
-      where: { id: artifactId },
-      data: {
-        ...(input.title !== undefined && input.title.trim().length > 0
-          ? { title: input.title.trim() }
-          : {}),
-        ...(input.description !== undefined ? { description: input.description.trim() } : {}),
-        ...(input.icon !== undefined ? { icon: input.icon } : {}),
-        ...(input.coverImageUrl !== undefined ? { coverImageUrl: input.coverImageUrl } : {}),
-        ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
-        ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
-        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
-        ...(safeSnapshot !== undefined
-          ? {
-              currentSnapshot: safeSnapshot,
-              currentRevision: { increment: 1 },
-            }
-          : {}),
-        updatedById: userId,
-      },
-    });
+    let updated: Artifact | undefined;
 
     if (safeSnapshot !== undefined) {
-      // Check if this artifact has an initial version; if not, record baseline version 1
-      const versionCount = await prisma.artifactVersion.count({
-        where: { artifactId },
-      });
+      const maxRetries = 3;
+      let attempt = 0;
 
-      if (versionCount === 0) {
-        await prisma.artifactVersion.create({
-          data: {
-            artifactId,
-            versionNumber: 1,
-            title: updated.title,
-            snapshotData: safeSnapshot,
-            changeSummary: "Initial snapshot",
-            source: "AUTOMATIC",
-            createdById: userId,
-          },
-        }).catch(() => {
-          // Ignore unique collision on initial baseline version
-        });
-      } else {
-        // Automatic checkpoint creation if meaningful time (5 minutes) has elapsed
-        const latestVer = await prisma.artifactVersion.findFirst({
-          where: { artifactId },
-          orderBy: { versionNumber: "desc" },
-          select: { createdAt: true, versionNumber: true },
-        });
+      while (attempt < maxRetries) {
+        attempt++;
+        try {
+          updated = await prisma.$transaction(async (tx) => {
+            const lockedArtifacts = await tx.$queryRaw<Array<{
+              id: string;
+              title: string;
+              workspaceId: string;
+              currentRevision: number;
+              currentSnapshot: unknown;
+            }>>`SELECT id, title, "workspaceId", "currentRevision", "currentSnapshot" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
 
-        const FIVE_MINUTES_MS = 5 * 60 * 1000;
-        if (
-          latestVer &&
-          Date.now() - latestVer.createdAt.getTime() > FIVE_MINUTES_MS
-        ) {
-          const nextVer = latestVer.versionNumber + 1;
-          await prisma.artifactVersion.create({
-            data: {
-              artifactId,
-              versionNumber: nextVer,
-              title: updated.title,
-              snapshotData: safeSnapshot,
-              changeSummary: "Periodic autosave checkpoint",
-              source: "AUTOMATIC",
-              createdById: userId,
-            },
-          }).catch(() => {
-            // Ignore race condition on periodic autosave
+            if (!lockedArtifacts || lockedArtifacts.length === 0) {
+              throw new NotFoundError("Artifact not found.");
+            }
+
+            const updatedArt = await tx.artifact.update({
+              where: { id: artifactId },
+              data: {
+                ...(input.title !== undefined && input.title.trim().length > 0
+                  ? { title: input.title.trim() }
+                  : {}),
+                ...(input.description !== undefined ? { description: input.description.trim() } : {}),
+                ...(input.icon !== undefined ? { icon: input.icon } : {}),
+                ...(input.coverImageUrl !== undefined ? { coverImageUrl: input.coverImageUrl } : {}),
+                ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
+                ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
+                ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+                currentSnapshot: safeSnapshot,
+                currentRevision: { increment: 1 },
+                updatedById: userId,
+              },
+            });
+
+            // Automatic checkpoint creation policy:
+            // 1. Initial snapshot: if no versions exist, create baseline version 1
+            const latestVer = await tx.artifactVersion.findFirst({
+              where: { artifactId },
+              orderBy: { versionNumber: "desc" },
+              select: { id: true, versionNumber: true, snapshotData: true, createdAt: true },
+            });
+
+            if (!latestVer) {
+              await tx.artifactVersion.create({
+                data: {
+                  artifactId,
+                  versionNumber: 1,
+                  title: updatedArt.title,
+                  snapshotData: safeSnapshot,
+                  changeSummary: "Initial snapshot",
+                  source: "AUTOMATIC",
+                  createdById: userId,
+                },
+              });
+            } else {
+              // 2. Periodic autosave checkpoint: if time > 5 minutes AND content has changed
+              const FIVE_MINUTES_MS = 5 * 60 * 1000;
+              const isTimeElapsed = Date.now() - latestVer.createdAt.getTime() > FIVE_MINUTES_MS;
+
+              if (isTimeElapsed) {
+                const latestHash = computeSnapshotHash(latestVer.snapshotData);
+                const currentHash = computeSnapshotHash(safeSnapshot);
+
+                // Deduplicate unchanged snapshots
+                if (latestHash !== currentHash) {
+                  const nextVersionNumber = latestVer.versionNumber + 1;
+                  await tx.artifactVersion.create({
+                    data: {
+                      artifactId,
+                      versionNumber: nextVersionNumber,
+                      title: updatedArt.title,
+                      snapshotData: safeSnapshot,
+                      changeSummary: "Periodic autosave checkpoint",
+                      source: "AUTOMATIC",
+                      createdById: userId,
+                    },
+                  });
+                }
+              }
+            }
+
+            return updatedArt;
           });
+          break; // Succeeded
+        } catch (err: unknown) {
+          const isUniqueConstraint =
+            err && typeof err === "object" && "code" in err && (err as { code: string }).code === "P2002";
+          if (isUniqueConstraint && attempt < maxRetries) {
+            continue;
+          }
+          throw err;
         }
       }
+
+      if (!updated) {
+        throw new Error("Failed to persist snapshot after concurrent attempts.");
+      }
+    } else {
+      updated = await prisma.artifact.update({
+        where: { id: artifactId },
+        data: {
+          ...(input.title !== undefined && input.title.trim().length > 0
+            ? { title: input.title.trim() }
+            : {}),
+          ...(input.description !== undefined ? { description: input.description.trim() } : {}),
+          ...(input.icon !== undefined ? { icon: input.icon } : {}),
+          ...(input.coverImageUrl !== undefined ? { coverImageUrl: input.coverImageUrl } : {}),
+          ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
+          ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
+          ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+          updatedById: userId,
+        },
+      });
     }
 
     const metadataSummary: Record<string, unknown> = {};

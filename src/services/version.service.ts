@@ -23,10 +23,10 @@ export interface CreateCheckpointInput {
 }
 
 export interface RestoreVersionOptions {
-  expectedRevision?: number;
+  expectedRevision: number;
 }
 
-function computeSnapshotHash(data: unknown): string {
+export function computeSnapshotHash(data: unknown): string {
   try {
     const serialized = JSON.stringify(data);
     return createHash("sha256").update(serialized).digest("hex");
@@ -251,11 +251,47 @@ export class VersionService {
       attempt++;
       try {
         const created = await prisma.$transaction(async (tx) => {
+          // Serialize operations for this artifact using row-level locking
+          const lockedArtifacts = await tx.$queryRaw<Array<{
+            id: string;
+            title: string;
+            workspaceId: string;
+            currentRevision: number;
+          }>>`SELECT id, title, "workspaceId", "currentRevision" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
+
+          if (!lockedArtifacts || lockedArtifacts.length === 0) {
+            throw new NotFoundError("Artifact not found.");
+          }
+
+          const lockedArtifact = lockedArtifacts[0];
+
           const maxRecord = await tx.artifactVersion.findFirst({
             where: { artifactId },
             orderBy: { versionNumber: "desc" },
-            select: { versionNumber: true },
+            include: {
+              createdBy: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  image: true,
+                  color: true,
+                },
+              },
+            },
           });
+
+          // Deduplication check: If source is AUTOMATIC, compare with latest version
+          if (source === "AUTOMATIC" && maxRecord) {
+            const latestHash = computeSnapshotHash(maxRecord.snapshotData);
+            const incomingHash = computeSnapshotHash(snapshotToSave);
+            if (latestHash && incomingHash && latestHash === incomingHash) {
+              return {
+                newVersion: maxRecord,
+                updatedArtifact: { currentRevision: lockedArtifact.currentRevision },
+              };
+            }
+          }
 
           const nextVersionNumber = (maxRecord?.versionNumber ?? 0) + 1;
 
@@ -293,25 +329,25 @@ export class VersionService {
             },
           });
 
+          if (source === "MANUAL") {
+            await tx.activityEvent.create({
+              data: {
+                workspaceId: lockedArtifact.workspaceId,
+                userId,
+                action: "artifact.version.created",
+                entityType: "artifact_version",
+                entityId: newVersion.id,
+                metadata: {
+                  artifactId,
+                  versionNumber: newVersion.versionNumber,
+                  title: newVersion.title,
+                },
+              },
+            });
+          }
+
           return { newVersion, updatedArtifact };
         });
-
-        if (source === "MANUAL") {
-          await prisma.activityEvent.create({
-            data: {
-              workspaceId: artifact.workspaceId,
-              userId,
-              action: "artifact.version.created",
-              entityType: "artifact_version",
-              entityId: created.newVersion.id,
-              metadata: {
-                artifactId,
-                versionNumber: created.newVersion.versionNumber,
-                title: created.newVersion.title,
-              },
-            },
-          });
-        }
 
         return {
           ...created.newVersion,
@@ -339,66 +375,32 @@ export class VersionService {
     userId: string,
     artifactId: string,
     versionId: string,
-    options: RestoreVersionOptions = {}
+    options: RestoreVersionOptions
   ) {
     if (!userId) {
       throw new AuthorizationError("Authentication required.", 401);
     }
 
+    if (
+      !options ||
+      options.expectedRevision === undefined ||
+      options.expectedRevision === null ||
+      typeof options.expectedRevision !== "number" ||
+      !Number.isInteger(options.expectedRevision) ||
+      options.expectedRevision <= 0
+    ) {
+      throw new AuthorizationError(
+        "expectedRevision is required and must be a positive integer.",
+        400
+      );
+    }
+
     // Require EDIT access on the artifact to restore
-    const { artifact } = await AuthorizationService.requireArtifactAccess(
+    await AuthorizationService.requireArtifactAccess(
       userId,
       artifactId,
       "EDIT"
     );
-
-    const targetVersion = await prisma.artifactVersion.findUnique({
-      where: { id: versionId },
-    });
-
-    if (!targetVersion || targetVersion.artifactId !== artifactId) {
-      throw new NotFoundError("Artifact version not found.");
-    }
-
-    // Concurrency conflict check
-    if (
-      options.expectedRevision !== undefined &&
-      options.expectedRevision !== null &&
-      artifact.currentRevision !== options.expectedRevision
-    ) {
-      throw new ConflictError(
-        "Conflict: The artifact has been modified since it was loaded. Please refresh version history.",
-        artifact.currentRevision
-      );
-    }
-
-    // Pre-restore safety: Check if displaced current state differs from the latest historical version
-    const latestVersion = await prisma.artifactVersion.findFirst({
-      where: { artifactId },
-      orderBy: { versionNumber: "desc" },
-    });
-
-    const currentHash = computeSnapshotHash(artifact.currentSnapshot);
-    const latestVersionHash = computeSnapshotHash(latestVersion?.snapshotData);
-
-    // If currentSnapshot exists and has changes not saved to any version, preserve it
-    if (
-      artifact.currentSnapshot &&
-      typeof artifact.currentSnapshot === "object" &&
-      currentHash &&
-      currentHash !== latestVersionHash
-    ) {
-      await this.createCheckpoint(userId, artifactId, {
-        title: artifact.title,
-        changeSummary: "Displaced state preserved prior to restoration",
-        snapshotData: artifact.currentSnapshot as Record<string, unknown>,
-        source: "RESTORE_RECOVERY",
-      });
-    }
-
-    // Restore targetVersion
-    const restoredSnapshot = targetVersion.snapshotData as Record<string, unknown>;
-    const restoredTitle = targetVersion.title;
 
     const maxRetries = 3;
     let attempt = 0;
@@ -407,13 +409,80 @@ export class VersionService {
       attempt++;
       try {
         const result = await prisma.$transaction(async (tx) => {
-          const maxRecord = await tx.artifactVersion.findFirst({
-            where: { artifactId },
-            orderBy: { versionNumber: "desc" },
-            select: { versionNumber: true },
+          // 1. Lock the artifact row using PostgreSQL FOR UPDATE
+          const lockedArtifacts = await tx.$queryRaw<
+            Array<{
+              id: string;
+              workspaceId: string;
+              type: "DOCUMENT" | "WHITEBOARD";
+              title: string;
+              currentSnapshot: unknown;
+              currentRevision: number;
+              isArchived: boolean;
+            }>
+          >`SELECT id, "workspaceId", type, title, "currentSnapshot", "currentRevision", "isArchived" FROM artifact WHERE id = ${artifactId} FOR UPDATE`;
+
+          if (!lockedArtifacts || lockedArtifacts.length === 0) {
+            throw new NotFoundError("Artifact not found.");
+          }
+
+          const lockedArtifact = lockedArtifacts[0];
+          if (lockedArtifact.isArchived) {
+            throw new NotFoundError("Artifact not found.");
+          }
+
+          // 2. Atomic optimistic concurrency check: verify currentRevision matches expectedRevision
+          if (lockedArtifact.currentRevision !== options.expectedRevision) {
+            throw new ConflictError(
+              "Conflict: The artifact has been modified since it was loaded. Please refresh version history.",
+              lockedArtifact.currentRevision
+            );
+          }
+
+          // 3. Re-read and validate target version inside this transaction
+          const targetVersion = await tx.artifactVersion.findUnique({
+            where: { id: versionId },
           });
 
-          const nextVersionNumber = (maxRecord?.versionNumber ?? 0) + 1;
+          if (!targetVersion || targetVersion.artifactId !== artifactId) {
+            throw new NotFoundError("Artifact version not found.");
+          }
+
+          // 4. Pre-restore safety: check if displaced current state differs from the latest historical version
+          const latestVersion = await tx.artifactVersion.findFirst({
+            where: { artifactId },
+            orderBy: { versionNumber: "desc" },
+          });
+
+          let nextVersionNumber = (latestVersion?.versionNumber ?? 0) + 1;
+
+          const currentHash = computeSnapshotHash(lockedArtifact.currentSnapshot);
+          const latestVersionHash = computeSnapshotHash(latestVersion?.snapshotData);
+
+          // If currentSnapshot exists and has changes not saved to any version, preserve it
+          if (
+            lockedArtifact.currentSnapshot &&
+            typeof lockedArtifact.currentSnapshot === "object" &&
+            currentHash &&
+            currentHash !== latestVersionHash
+          ) {
+            await tx.artifactVersion.create({
+              data: {
+                artifactId,
+                versionNumber: nextVersionNumber,
+                title: lockedArtifact.title,
+                snapshotData: lockedArtifact.currentSnapshot as unknown as Prisma.InputJsonValue,
+                changeSummary: "Pre-restore recovery checkpoint",
+                source: "RESTORE_RECOVERY",
+                createdById: userId,
+              },
+            });
+            nextVersionNumber++;
+          }
+
+          // 5. Restore targetVersion
+          const restoredSnapshot = targetVersion.snapshotData as Record<string, unknown>;
+          const restoredTitle = targetVersion.title;
 
           const restoredVersionRecord = await tx.artifactVersion.create({
             data: {
@@ -449,30 +518,35 @@ export class VersionService {
             },
           });
 
-          return { restoredVersionRecord, updatedArtifact };
-        });
-
-        await prisma.activityEvent.create({
-          data: {
-            workspaceId: artifact.workspaceId,
-            userId,
-            action: "artifact.version.restored",
-            entityType: "artifact_version",
-            entityId: result.restoredVersionRecord.id,
-            metadata: {
-              artifactId,
-              restoredFromVersion: targetVersion.versionNumber,
-              newVersionNumber: result.restoredVersionRecord.versionNumber,
+          await tx.activityEvent.create({
+            data: {
+              workspaceId: lockedArtifact.workspaceId,
+              userId,
+              action: "artifact.version.restored",
+              entityType: "artifact_version",
+              entityId: restoredVersionRecord.id,
+              metadata: {
+                artifactId,
+                restoredFromVersion: targetVersion.versionNumber,
+                newVersionNumber: restoredVersionRecord.versionNumber,
+              },
             },
-          },
+          });
+
+          return {
+            restoredVersionRecord,
+            updatedArtifact,
+            restoredSnapshot,
+            restoredTitle,
+          };
         });
 
         return {
           success: true,
           restoredVersion: result.restoredVersionRecord,
           currentRevision: result.updatedArtifact.currentRevision,
-          snapshotData: restoredSnapshot,
-          title: restoredTitle,
+          snapshotData: result.restoredSnapshot,
+          title: result.restoredTitle,
         };
       } catch (err: unknown) {
         const isUniqueConstraint =

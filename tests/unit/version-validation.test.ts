@@ -127,6 +127,12 @@ describe("Version & Snapshot Validation Unit Tests", () => {
 
       const invalidNegative = restoreVersionSchema.safeParse({ expectedRevision: -1 });
       expect(invalidNegative.success).toBe(false);
+
+      const invalidMissing = restoreVersionSchema.safeParse({});
+      expect(invalidMissing.success).toBe(false);
+
+      const invalidZero = restoreVersionSchema.safeParse({ expectedRevision: 0 });
+      expect(invalidZero.success).toBe(false);
     });
 
     it("validates listVersionsQuerySchema pagination defaults and limits", () => {
