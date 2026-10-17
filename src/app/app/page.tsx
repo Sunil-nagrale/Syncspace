@@ -6,7 +6,6 @@ import {
   FolderTree,
   Clock,
   ArrowUpRight,
-  Activity,
   Building,
   Sparkles,
 } from "lucide-react";
@@ -18,7 +17,9 @@ import { AuthorizationService } from "@/services/authorization.service";
 import { WorkspaceService } from "@/services/workspace.service";
 import { ProjectService } from "@/services/project.service";
 import { ArtifactService } from "@/services/artifact.service";
-import { prisma } from "@/lib/prisma";
+import { ActivityService } from "@/services/activity.service";
+import type { WorkspaceActivityResponse } from "@/lib/validations/activity";
+import { WorkspaceActivityFeed } from "@/components/activity/workspace-activity-feed";
 import { CreateWorkspaceDialog } from "@/components/workspaces/create-workspace-dialog";
 import { CreateProjectDialog } from "@/components/projects/create-project-dialog";
 import { CreateArtifactDialog } from "@/components/artifacts/create-artifact-dialog";
@@ -54,13 +55,7 @@ export default async function WorkspaceDashboard({
   let activeWorkspace: (typeof workspaces)[0] | null = null;
   let projects: Awaited<ReturnType<typeof ProjectService.getWorkspaceProjects>> = [];
   let artifacts: Awaited<ReturnType<typeof ArtifactService.getWorkspaceArtifacts>> = [];
-  let activityEvents: Array<{
-    id: string;
-    action: string;
-    createdAt: Date;
-    user: { name: string; color: string };
-    metadata: unknown;
-  }> = [];
+  let initialActivity: WorkspaceActivityResponse | null = null;
 
   if (userId) {
     try {
@@ -70,25 +65,19 @@ export default async function WorkspaceDashboard({
           ? workspaces.find((w) => w.id === requestedWorkspaceId) || workspaces[0]
           : workspaces[0];
 
-        // Fetch projects and artifacts in parallel
-        const [loadedProjects, loadedArtifacts, loadedActivities] = await Promise.all([
+        // Fetch projects, artifacts, and RBAC-filtered activity feed in parallel
+        const [loadedProjects, loadedArtifacts, loadedActivity] = await Promise.all([
           ProjectService.getWorkspaceProjects(userId, activeWorkspace.id),
           ArtifactService.getWorkspaceArtifacts(userId, activeWorkspace.id),
-          prisma.activityEvent.findMany({
-            where: { workspaceId: activeWorkspace.id },
-            include: {
-              user: {
-                select: { name: true, color: true },
-              },
-            },
-            orderBy: { createdAt: "desc" },
-            take: 10,
+          ActivityService.listWorkspaceActivity(userId, activeWorkspace.id, {
+            limit: 15,
+            category: "ALL",
           }),
         ]);
 
         projects = loadedProjects;
         artifacts = loadedArtifacts;
-        activityEvents = loadedActivities;
+        initialActivity = loadedActivity;
       }
     } catch (e) {
       console.error("Failed to query workspace data:", e);
@@ -394,42 +383,13 @@ export default async function WorkspaceDashboard({
           </Card>
 
           {/* Activity Stream */}
-          <Card className="border">
-            <CardHeader className="p-4 pb-2">
-              <div className="flex items-center gap-2">
-                <Activity className="h-4 w-4 text-muted-foreground" />
-                <CardTitle className="text-sm font-semibold">Workspace Activity</CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent className="p-4 pt-2">
-              {activityEvents.length === 0 ? (
-                <p className="text-xs text-muted-foreground py-4 text-center">
-                  No activity events recorded yet.
-                </p>
-              ) : (
-                <div className="space-y-4">
-                  {activityEvents.map((act) => (
-                    <div key={act.id} className="flex items-start gap-2.5 text-xs">
-                      <div
-                        className="h-5 w-5 rounded-full text-[9px] font-bold text-white flex items-center justify-center shrink-0 mt-0.5 bg-primary"
-                      >
-                        {act.user.name.slice(0, 2).toUpperCase()}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-foreground leading-snug">
-                          <span className="font-medium">{act.user.name}</span>{" "}
-                          <span className="text-muted-foreground">{act.action}</span>
-                        </p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">
-                          {new Date(act.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <WorkspaceActivityFeed
+            workspaceId={activeWorkspace.id}
+            initialItems={initialActivity?.items}
+            initialNextCursor={initialActivity?.nextCursor ?? null}
+            initialHasMore={initialActivity?.hasMore ?? false}
+            pageSize={15}
+          />
         </div>
       </div>
     </div>

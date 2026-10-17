@@ -220,44 +220,29 @@ graph LR
   - `npx.cmd playwright test tests/e2e/artifact-comments.spec.ts` (2/2 passed)
   - Full Playwright regression suite: `npx.cmd playwright test` (17/17 passed across all 5 e2e specs).
 
-### Phase 8B: Mentions, Activity Feeds & Notification Delivery (Next Phase)
+### Phase 8B: Mentions & Notification Delivery (Completed & Verified)
 
 - **Prerequisites**: Phase 8A complete.
 - **Deliverables**:
-  - Inline `@mention` user autocomplete suggestions during comment composition.
-  - In-app notification center inbox with unread counts and direct artifact discussion deep-links.
-  - Workspace activity feed logging comment actions (`COMMENT_CREATED`, `COMMENT_RESOLVED`).
-- **Expected Files / Modules**:
-  - `src/app/api/users/mention-suggestions/route.ts`
-  - `src/components/notifications/notifications-popover.tsx`
-  - `src/services/notification.service.ts`
-- **Definition of Done**: Mentions trigger notifications and workspace activity logs without destabilizing core commenting.
+  - Inline `@mention` user autocomplete suggestions during comment composition (`/api/artifacts/[artifactId]/mention-suggestions`).
+  - Atomic mention extraction and RBAC-verified notification delivery (`NotificationService`).
+  - In-app notification center inbox (`NotificationsPopover`) with unread counts, single/bulk mark-as-read, and direct artifact discussion deep-links.
 
 ---
 
-## Phase G: Version History, Attachments, Search & Activity
+## Phase G: Version History, Attachments, Search & Activity (Completed & Verified)
 
 - **Prerequisites**: Phase F complete.
 - **Deliverables**:
-  - S3-compatible private file attachment service with presigned upload and download URLs.
-  - File upload drawer with drag-and-drop preview.
-  - Point-in-time version history viewer with one-click snapshot rollback.
-  - Full-text search and global command palette (`Cmd+K`).
-  - Workspace-wide activity feed.
-- **Expected Files / Modules**:
-  - `services/storage.service.ts`, `app/api/attachments/presign-upload/route.ts`, `app/api/attachments/presign-download/route.ts`
-  - `features/attachments/components/attachment-drawer.tsx`
-  - `features/history/components/version-history-panel.tsx`
-  - `features/search/components/command-palette.tsx`
-  - `features/activity/components/activity-feed.tsx`
-- **Acceptance Criteria**:
-  - Files up to 25MB upload directly to S3 via presigned URLs and render download links.
-  - Reverting a version restores the exact previous document/board snapshot.
-  - `Cmd+K` finds documents, whiteboards, and projects instantly by title or content.
-- **Automated Tests**:
-  - Unit tests for S3 key formatting and command palette search indexing.
-- **External Dependencies**: S3 bucket or MinIO.
-- **Definition of Done**: Attachments, version history, search, and activity tracking fully verified.
+  - **Phase 9A — Point-in-Time Version History & Rollback**:
+    - Immutable `ArtifactVersion` checkpoints (`MANUAL`, `AUTOMATIC`, `RESTORE_RECOVERY`, `RESTORED`) with monotonic version numbering, optimistic concurrency (`expectedRevision`), and live Tiptap/Excalidraw collaboration room synchronization (`VersionService`, `VersionHistoryPanel`).
+  - **Phase 9B — Secure File Attachments**:
+    - Staging-to-final private object storage promotion (`S3StorageProvider`, `LocalFileStorageProvider`, `InMemoryStorageProvider`), magic-byte content signature validation, SHA-256 integrity verification, and permission-scoped download/preview (`AttachmentService`, `ArtifactAttachmentsDrawer`).
+  - **Phase 10A — Full-Text Search & Global Command Palette**:
+    - PostgreSQL weighted `tsvector` + GIN full-text search across Documents, Whiteboards, and Projects with prefix matching, safe highlighted excerpts, and strict RBAC filtering (`SearchService`, `GET /api/search`, `CommandPalette` via `Cmd+K`/`Ctrl+K`, and `/app/search`).
+  - **Phase 10B — Secure Workspace Activity Feed**:
+    - Transactional `ActivityEvent` logging with `artifactId` relation (`ON DELETE CASCADE`) across artifacts, projects, comments, versions, attachments, invitations, and members (`ActivityService`, `GET /api/workspaces/[workspaceId]/activity`, and `WorkspaceActivityFeed` on `/app`).
+    - Strict workspace membership verification (`404` for non-members/revoked members), `ArtifactPermission` (`role = 'NONE'`) exclusion for artifact and child-entity events, metadata sanitization, archived/deleted target redaction, category filtering, and deterministic keyset cursor pagination (`createdAt DESC, id DESC`).
 
 ---
 

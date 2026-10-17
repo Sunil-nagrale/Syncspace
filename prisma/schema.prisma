@@ -231,6 +231,7 @@ model Artifact {
   permissions ArtifactPermission[]
   versions    ArtifactVersion[]
   attachments    Attachment[]
+  activityEvents ActivityEvent[]
   commentThreads CommentThread[]
   commentThreadEvents CommentThreadEvent[]
   notifications  Notification[]
@@ -322,6 +323,8 @@ model ActivityEvent {
   id          String    @id @default(cuid())
   workspaceId String
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId  String?
+  artifact    Artifact? @relation(fields: [artifactId], references: [id], onDelete: Cascade)
   userId      String
   user        User      @relation("ActivityUser", fields: [userId], references: [id], onDelete: Cascade)
   action      String
@@ -331,6 +334,8 @@ model ActivityEvent {
   createdAt   DateTime  @default(now())
 
   @@index([workspaceId, createdAt])
+  @@index([workspaceId, createdAt, id])
+  @@index([artifactId])
   @@index([userId])
   @@map("activity_event")
 }

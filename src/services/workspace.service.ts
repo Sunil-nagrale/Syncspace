@@ -4,6 +4,7 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "./authorization.service";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 import { Workspace, WorkspaceRole } from "@prisma/client";
 import { randomBytes } from "crypto";
 
@@ -96,7 +97,7 @@ export class WorkspaceService {
           action: "workspace.created",
           entityType: "workspace",
           entityId: workspace.id,
-          metadata: { name: workspace.name, slug: workspace.slug },
+          metadata: sanitizeActivityMetadata({ name: workspace.name }),
         },
       });
 
@@ -200,26 +201,30 @@ export class WorkspaceService {
   ): Promise<Workspace> {
     await AuthorizationService.requireWorkspaceAccess(userId, workspaceId, "ADMIN");
 
-    const updated = await prisma.workspace.update({
-      where: { id: workspaceId },
-      data: {
-        ...(data.name ? { name: data.name.trim() } : {}),
-        ...(data.logoUrl !== undefined ? { logoUrl: data.logoUrl } : {}),
-      },
-    });
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.workspace.update({
+        where: { id: workspaceId },
+        data: {
+          ...(data.name ? { name: data.name.trim() } : {}),
+          ...(data.logoUrl !== undefined ? { logoUrl: data.logoUrl } : {}),
+        },
+      });
 
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId,
-        userId,
-        action: "workspace.updated",
-        entityType: "workspace",
-        entityId: workspaceId,
-        metadata: data,
-      },
-    });
+      await tx.activityEvent.create({
+        data: {
+          workspaceId,
+          userId,
+          action: "workspace.updated",
+          entityType: "workspace",
+          entityId: workspaceId,
+          metadata: sanitizeActivityMetadata({
+            name: updated.name,
+          }),
+        },
+      });
 
-    return updated;
+      return updated;
+    });
   }
 
   /**
@@ -308,37 +313,39 @@ export class WorkspaceService {
       }
     }
 
-    const updated = await prisma.workspaceMember.update({
-      where: { id: memberId },
-      data: { role: newRole },
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            color: true,
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.workspaceMember.update({
+        where: { id: memberId },
+        data: { role: newRole },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              color: true,
+            },
           },
         },
-      },
-    });
+      });
 
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId,
-        userId: actorUserId,
-        action: "member.role_updated",
-        entityType: "workspace_member",
-        entityId: memberId,
-        metadata: {
-          targetUserId: targetMember.userId,
-          previousRole: targetMember.role,
-          newRole,
+      await tx.activityEvent.create({
+        data: {
+          workspaceId,
+          userId: actorUserId,
+          action: "member.role_updated",
+          entityType: "workspace_member",
+          entityId: memberId,
+          metadata: sanitizeActivityMetadata({
+            targetUserId: targetMember.userId,
+            previousRole: targetMember.role,
+            newRole,
+          }),
         },
-      },
-    });
+      });
 
-    return updated;
+      return updated;
+    });
   }
 
   /**
@@ -413,7 +420,7 @@ export class WorkspaceService {
         where: { id: memberId },
       });
 
-      // Log activity event
+      // Log activity event without exposing email addresses
       await tx.activityEvent.create({
         data: {
           workspaceId,
@@ -421,11 +428,10 @@ export class WorkspaceService {
           action: "member.removed",
           entityType: "workspace_member",
           entityId: memberId,
-          metadata: {
-            removedUserId: targetMember.userId,
-            removedUserEmail: targetMember.user.email,
+          metadata: sanitizeActivityMetadata({
+            targetUserId: targetMember.userId,
             removedUserRole: targetMember.role,
-          },
+          }),
         },
       });
     });

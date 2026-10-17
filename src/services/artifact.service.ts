@@ -5,6 +5,7 @@ import {
 } from "./authorization.service";
 import { computeSnapshotHash } from "./version.service";
 import { extractArtifactSearchText } from "@/lib/validations/search";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 import { Artifact, ArtifactType } from "@prisma/client";
 import { randomBytes } from "crypto";
 
@@ -66,30 +67,43 @@ export class ArtifactService {
 
     const liveblocksRoomId = `art_${randomBytes(12).toString("hex")}`;
 
-    const artifact = await prisma.artifact.create({
-      data: {
-        workspaceId: input.workspaceId,
-        projectId: input.projectId,
-        type: input.type,
-        title: input.title?.trim() || (input.type === "DOCUMENT" ? "Untitled Document" : "Untitled Whiteboard"),
-        description: input.description?.trim(),
-        icon: input.icon,
-        coverImageUrl: input.coverImageUrl,
-        liveblocksRoomId,
-        createdById: userId,
-        updatedById: userId,
-      },
-    });
+    const artifact = await prisma.$transaction(async (tx) => {
+      const created = await tx.artifact.create({
+        data: {
+          workspaceId: input.workspaceId,
+          projectId: input.projectId,
+          type: input.type,
+          title:
+            input.title?.trim() ||
+            (input.type === "DOCUMENT"
+              ? "Untitled Document"
+              : "Untitled Whiteboard"),
+          description: input.description?.trim(),
+          icon: input.icon,
+          coverImageUrl: input.coverImageUrl,
+          liveblocksRoomId,
+          createdById: userId,
+          updatedById: userId,
+        },
+      });
 
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId: input.workspaceId,
-        userId,
-        action: `artifact.created.${input.type.toLowerCase()}`,
-        entityType: "artifact",
-        entityId: artifact.id,
-        metadata: { title: artifact.title, type: artifact.type },
-      },
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: input.workspaceId,
+          artifactId: created.id,
+          userId,
+          action: `artifact.created.${input.type.toLowerCase()}`,
+          entityType: "artifact",
+          entityId: created.id,
+          metadata: sanitizeActivityMetadata({
+            artifactId: created.id,
+            title: created.title,
+            type: created.type,
+          }),
+        },
+      });
+
+      return created;
     });
 
     return artifact;
@@ -258,6 +272,20 @@ export class ArtifactService {
         ? extractArtifactSearchText(artifact.type, safeSnapshot)
         : undefined;
 
+    const hasMetadataMutation =
+      (input.title !== undefined &&
+        input.title.trim().length > 0 &&
+        input.title.trim() !== artifact.title) ||
+      (input.description !== undefined &&
+        input.description.trim() !== (artifact.description ?? "")) ||
+      (input.icon !== undefined && input.icon !== artifact.icon) ||
+      (input.coverImageUrl !== undefined &&
+        input.coverImageUrl !== artifact.coverImageUrl) ||
+      (input.isPinned !== undefined && input.isPinned !== artifact.isPinned) ||
+      (input.isArchived !== undefined &&
+        input.isArchived !== artifact.isArchived) ||
+      (input.projectId !== undefined && input.projectId !== artifact.projectId);
+
     let updated: Artifact | undefined;
 
     if (safeSnapshot !== undefined) {
@@ -341,6 +369,36 @@ export class ArtifactService {
               }
             }
 
+            if (hasMetadataMutation) {
+              const isArchiving = input.isArchived === true;
+              await tx.activityEvent.create({
+                data: {
+                  workspaceId: artifact.workspaceId,
+                  artifactId,
+                  userId,
+                  action: isArchiving ? "artifact.archived" : "artifact.updated",
+                  entityType: "artifact",
+                  entityId: artifactId,
+                  metadata: sanitizeActivityMetadata(
+                    isArchiving
+                      ? {
+                          artifactId,
+                          type: updatedArt.type,
+                          isArchived: true,
+                        }
+                      : {
+                          artifactId,
+                          title: updatedArt.title,
+                          type: updatedArt.type,
+                          ...(input.isPinned !== undefined
+                            ? { isPinned: updatedArt.isPinned }
+                            : {}),
+                        }
+                  ),
+                },
+              });
+            }
+
             return updatedArt;
           });
           break; // Succeeded
@@ -366,7 +424,7 @@ export class ArtifactService {
           "EDIT"
         );
 
-        return tx.artifact.update({
+        const updatedArt = await tx.artifact.update({
           where: { id: artifactId },
           data: {
             ...(input.title !== undefined && input.title.trim().length > 0
@@ -381,25 +439,38 @@ export class ArtifactService {
             updatedById: userId,
           },
         });
+
+        const isArchiving = input.isArchived === true;
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: artifact.workspaceId,
+            artifactId,
+            userId,
+            action: isArchiving ? "artifact.archived" : "artifact.updated",
+            entityType: "artifact",
+            entityId: artifactId,
+            metadata: sanitizeActivityMetadata(
+              isArchiving
+                ? {
+                    artifactId,
+                    type: updatedArt.type,
+                    isArchived: true,
+                  }
+                : {
+                    artifactId,
+                    title: updatedArt.title,
+                    type: updatedArt.type,
+                    ...(input.isPinned !== undefined
+                      ? { isPinned: updatedArt.isPinned }
+                      : {}),
+                  }
+            ),
+          },
+        });
+
+        return updatedArt;
       });
     }
-
-    const metadataSummary: Record<string, unknown> = {};
-    if (input.title !== undefined) metadataSummary.title = updated.title;
-    if (input.isPinned !== undefined) metadataSummary.isPinned = updated.isPinned;
-    if (input.isArchived !== undefined) metadataSummary.isArchived = updated.isArchived;
-    if (input.contentSnapshot !== undefined) metadataSummary.hasSnapshot = true;
-
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId: artifact.workspaceId,
-        userId,
-        action: "artifact.updated",
-        entityType: "artifact",
-        entityId: artifactId,
-        metadata: JSON.parse(JSON.stringify(metadataSummary)),
-      },
-    });
 
     return updated;
   }
@@ -475,10 +546,27 @@ export class ArtifactService {
             userId: targetUserId,
           },
         });
+
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: artifact.workspaceId,
+            artifactId,
+            userId: actorUserId,
+            action: "artifact.permission_updated",
+            entityType: "artifact",
+            entityId: artifactId,
+            metadata: sanitizeActivityMetadata({
+              artifactId,
+              targetUserId,
+              role: "INHERIT",
+            }),
+          },
+        });
+
         return null;
       }
 
-      return tx.artifactPermission.upsert({
+      const permission = await tx.artifactPermission.upsert({
         where: {
           artifactId_userId: {
             artifactId,
@@ -494,6 +582,24 @@ export class ArtifactService {
           role,
         },
       });
+
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: artifact.workspaceId,
+          artifactId,
+          userId: actorUserId,
+          action: "artifact.permission_updated",
+          entityType: "artifact",
+          entityId: artifactId,
+          metadata: sanitizeActivityMetadata({
+            artifactId,
+            targetUserId,
+            role,
+          }),
+        },
+      });
+
+      return permission;
     });
   }
 }

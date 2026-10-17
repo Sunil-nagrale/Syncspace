@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { AuthorizationService } from "./authorization.service";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 import { Project } from "@prisma/client";
 
 export interface CreateProjectInput {
@@ -37,29 +38,31 @@ export class ProjectService {
       "EDITOR"
     );
 
-    const project = await prisma.project.create({
-      data: {
-        workspaceId,
-        name: input.name.trim(),
-        description: input.description?.trim(),
-        icon: input.icon,
-        color: input.color || "#6366F1",
-        createdById: userId,
-      },
-    });
+    return prisma.$transaction(async (tx) => {
+      const project = await tx.project.create({
+        data: {
+          workspaceId,
+          name: input.name.trim(),
+          description: input.description?.trim(),
+          icon: input.icon,
+          color: input.color || "#6366F1",
+          createdById: userId,
+        },
+      });
 
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId,
-        userId,
-        action: "project.created",
-        entityType: "project",
-        entityId: project.id,
-        metadata: { name: project.name },
-      },
-    });
+      await tx.activityEvent.create({
+        data: {
+          workspaceId,
+          userId,
+          action: "project.created",
+          entityType: "project",
+          entityId: project.id,
+          metadata: sanitizeActivityMetadata({ name: project.name }),
+        },
+      });
 
-    return project;
+      return project;
+    });
   }
 
   /**
@@ -124,29 +127,40 @@ export class ProjectService {
       "EDITOR"
     );
 
-    const updated = await prisma.project.update({
-      where: { id: projectId },
-      data: {
-        ...(input.name !== undefined ? { name: input.name.trim() } : {}),
-        ...(input.description !== undefined ? { description: input.description.trim() } : {}),
-        ...(input.icon !== undefined ? { icon: input.icon } : {}),
-        ...(input.color !== undefined ? { color: input.color } : {}),
-        ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
-      },
-    });
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.project.update({
+        where: { id: projectId },
+        data: {
+          ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+          ...(input.description !== undefined
+            ? { description: input.description.trim() }
+            : {}),
+          ...(input.icon !== undefined ? { icon: input.icon } : {}),
+          ...(input.color !== undefined ? { color: input.color } : {}),
+          ...(input.isArchived !== undefined
+            ? { isArchived: input.isArchived }
+            : {}),
+        },
+      });
 
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId: project.workspaceId,
-        userId,
-        action: "project.updated",
-        entityType: "project",
-        entityId: projectId,
-        metadata: JSON.parse(JSON.stringify(input)),
-      },
-    });
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: project.workspaceId,
+          userId,
+          action: input.isArchived === true ? "project.archived" : "project.updated",
+          entityType: "project",
+          entityId: projectId,
+          metadata: sanitizeActivityMetadata({
+            name: updated.name,
+            ...(input.isArchived !== undefined
+              ? { isArchived: input.isArchived }
+              : {}),
+          }),
+        },
+      });
 
-    return updated;
+      return updated;
+    });
   }
 
   /**
@@ -156,15 +170,33 @@ export class ProjectService {
     userId: string,
     projectId: string
   ): Promise<Project> {
-    await AuthorizationService.requireProjectAccess(
+    const { project } = await AuthorizationService.requireProjectAccess(
       userId,
       projectId,
       "ADMIN"
     );
 
-    return prisma.project.update({
-      where: { id: projectId },
-      data: { isArchived: true },
+    return prisma.$transaction(async (tx) => {
+      const archived = await tx.project.update({
+        where: { id: projectId },
+        data: { isArchived: true },
+      });
+
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: project.workspaceId,
+          userId,
+          action: "project.archived",
+          entityType: "project",
+          entityId: projectId,
+          metadata: sanitizeActivityMetadata({
+            name: archived.name,
+            isArchived: true,
+          }),
+        },
+      });
+
+      return archived;
     });
   }
 }

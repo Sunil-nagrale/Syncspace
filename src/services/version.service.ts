@@ -8,6 +8,7 @@ import {
 } from "./authorization.service";
 import { validateSnapshotPayload } from "@/lib/validations/version";
 import { extractArtifactSearchText } from "@/lib/validations/search";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 import { createHash } from "crypto";
 
 export interface ListVersionsOptions {
@@ -330,15 +331,16 @@ export class VersionService {
             await tx.activityEvent.create({
               data: {
                 workspaceId: lockedArtifact.workspaceId,
+                artifactId,
                 userId,
                 action: "artifact.version.created",
                 entityType: "artifact_version",
                 entityId: newVersion.id,
-                metadata: {
+                metadata: sanitizeActivityMetadata({
                   artifactId,
                   versionNumber: newVersion.versionNumber,
                   title: newVersion.title,
-                },
+                }),
               },
             });
           }
@@ -506,15 +508,16 @@ export class VersionService {
           await tx.activityEvent.create({
             data: {
               workspaceId: lockedArtifact.workspaceId,
+              artifactId,
               userId,
               action: "artifact.version.restored",
               entityType: "artifact_version",
               entityId: restoredVersionRecord.id,
-              metadata: {
+              metadata: sanitizeActivityMetadata({
                 artifactId,
                 restoredFromVersion: targetVersion.versionNumber,
                 newVersionNumber: restoredVersionRecord.versionNumber,
-              },
+              }),
             },
           });
 

@@ -14,6 +14,7 @@ import {
   CommentAnchorType,
 } from "@/lib/validations/comment";
 import { NotificationService } from "./notification.service";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 
 export interface CommentReactionSummary {
   emoji: string;
@@ -511,6 +512,22 @@ export class CommentService {
         artifactType: artifact.type,
       });
 
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: artifact.workspaceId,
+          artifactId,
+          userId: actorUserId,
+          action: "comment.thread_created",
+          entityType: "comment_thread",
+          entityId: newThread.id,
+          metadata: sanitizeActivityMetadata({
+            artifactId,
+            threadId: newThread.id,
+            anchorType: validated.anchorType,
+          }),
+        },
+      });
+
       return {
         ...newThread,
         createdBy,
@@ -622,6 +639,22 @@ export class CommentService {
         content: parseResult.data.content,
         artifactTitle: thread.artifact.title,
         artifactType: thread.artifact.type,
+      });
+
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: thread.workspaceId,
+          artifactId: thread.artifactId,
+          userId: actorUserId,
+          action: "comment.reply_created",
+          entityType: "comment",
+          entityId: created.id,
+          metadata: sanitizeActivityMetadata({
+            artifactId: thread.artifactId,
+            threadId,
+            commentId: created.id,
+          }),
+        },
       });
 
       return created;
@@ -781,9 +814,27 @@ export class CommentService {
 
     if (isRootComment) {
       // Deleting root comment deletes the entire thread and cascades to all comments/reactions/events
-      await prisma.commentThread.delete({
-        where: { id: comment.threadId },
+      await prisma.$transaction(async (tx) => {
+        await tx.commentThread.delete({
+          where: { id: comment.threadId },
+        });
+
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: comment.thread.workspaceId,
+            artifactId: comment.thread.artifactId,
+            userId: actorUserId,
+            action: "comment.thread_deleted",
+            entityType: "comment_thread",
+            entityId: comment.threadId,
+            metadata: sanitizeActivityMetadata({
+              artifactId: comment.thread.artifactId,
+              threadId: comment.threadId,
+            }),
+          },
+        });
       });
+
       return {
         success: true,
         deletedCommentId: commentId,
@@ -791,9 +842,28 @@ export class CommentService {
       };
     } else {
       // Deleting a reply deletes only this comment
-      await prisma.comment.delete({
-        where: { id: commentId },
+      await prisma.$transaction(async (tx) => {
+        await tx.comment.delete({
+          where: { id: commentId },
+        });
+
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: comment.thread.workspaceId,
+            artifactId: comment.thread.artifactId,
+            userId: actorUserId,
+            action: "comment.deleted",
+            entityType: "comment",
+            entityId: commentId,
+            metadata: sanitizeActivityMetadata({
+              artifactId: comment.thread.artifactId,
+              threadId: comment.threadId,
+              commentId,
+            }),
+          },
+        });
       });
+
       return {
         success: true,
         deletedCommentId: commentId,
@@ -849,6 +919,21 @@ export class CommentService {
             artifactId: thread.artifactId,
             userId: actorUserId,
             type: "RESOLVED",
+          },
+        });
+
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: thread.workspaceId,
+            artifactId: thread.artifactId,
+            userId: actorUserId,
+            action: "comment.thread_resolved",
+            entityType: "comment_thread",
+            entityId: threadId,
+            metadata: sanitizeActivityMetadata({
+              artifactId: thread.artifactId,
+              threadId,
+            }),
           },
         });
       }
@@ -963,6 +1048,21 @@ export class CommentService {
             artifactId: thread.artifactId,
             userId: actorUserId,
             type: "REOPENED",
+          },
+        });
+
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: thread.workspaceId,
+            artifactId: thread.artifactId,
+            userId: actorUserId,
+            action: "comment.thread_reopened",
+            entityType: "comment_thread",
+            entityId: threadId,
+            metadata: sanitizeActivityMetadata({
+              artifactId: thread.artifactId,
+              threadId,
+            }),
           },
         });
       }

@@ -26,6 +26,7 @@ import {
   sanitizeAttachmentFileName,
   validateFileSignatureAndContent,
 } from "@/lib/validations/attachment";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 
 export class AttachmentValidationError extends Error {
   constructor(
@@ -694,17 +695,17 @@ export class AttachmentService {
         await tx.activityEvent.create({
           data: {
             workspaceId: txAccess.artifact.workspaceId,
+            artifactId: txAccess.artifact.id,
             userId,
             action: "UPLOADED_ATTACHMENT",
             entityType: "ATTACHMENT",
             entityId: updated.id,
-            metadata: {
+            metadata: sanitizeActivityMetadata({
               artifactId: txAccess.artifact.id,
               fileName: updated.fileName,
               fileType: updated.fileType,
               fileSize: updated.fileSize,
-              sha256: validation.sha256,
-            },
+            }),
           },
         });
 
@@ -1013,14 +1014,14 @@ export class AttachmentService {
         prisma.activityEvent.create({
           data: {
             workspaceId,
+            artifactId,
             userId,
             action: "ATTACHMENT_INTEGRITY_FAILED",
             entityType: "ATTACHMENT",
             entityId: attachmentId,
-            metadata: {
+            metadata: sanitizeActivityMetadata({
               artifactId,
-              reason: "Stored SHA-256 checksum mismatch detected on retrieval.",
-            },
+            }),
           },
         }),
       ]);
@@ -1106,16 +1107,17 @@ export class AttachmentService {
       await tx.activityEvent.create({
         data: {
           workspaceId: lockedRecord.workspaceId,
+          artifactId: lockedRecord.artifactId,
           userId,
           action: "DELETED_ATTACHMENT",
           entityType: "ATTACHMENT",
           entityId: lockedRecord.target.id,
-          metadata: {
+          metadata: sanitizeActivityMetadata({
             artifactId: lockedRecord.artifactId,
             fileName: lockedRecord.target.fileName,
             fileType: lockedRecord.target.fileType,
             fileSize: lockedRecord.target.fileSize,
-          },
+          }),
         },
       });
     });

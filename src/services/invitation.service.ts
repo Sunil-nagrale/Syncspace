@@ -4,6 +4,7 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "./authorization.service";
+import { sanitizeActivityMetadata } from "@/lib/validations/activity";
 import { Invitation, WorkspaceRole, InvitationStatus } from "@prisma/client";
 import { randomBytes, createHash } from "crypto";
 
@@ -146,48 +147,50 @@ export class InvitationService {
       }
     }
 
-    // Revoke any previous pending invitation for this workspace + email
-    await prisma.invitation.updateMany({
-      where: {
-        workspaceId,
-        email,
-        status: "PENDING",
-      },
-      data: {
-        status: "REVOKED",
-      },
-    });
-
     // Generate cryptographic token and hash
     const { rawToken, tokenHash } = this.generateSecureToken();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7-day expiration
 
-    const invitation = await prisma.invitation.create({
-      data: {
-        workspaceId,
-        email,
-        role: requestedRole,
-        token: tokenHash,
-        invitedById: actorUserId,
-        status: "PENDING",
-        expiresAt,
-      },
-    });
-
-    // Record audit event
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId,
-        userId: actorUserId,
-        action: "invitation.created",
-        entityType: "invitation",
-        entityId: invitation.id,
-        metadata: {
-          recipientEmail: email,
-          role: requestedRole,
-          expiresAt: expiresAt.toISOString(),
+    const invitation = await prisma.$transaction(async (tx) => {
+      // Revoke any previous pending invitation for this workspace + email
+      await tx.invitation.updateMany({
+        where: {
+          workspaceId,
+          email,
+          status: "PENDING",
         },
-      },
+        data: {
+          status: "REVOKED",
+        },
+      });
+
+      const created = await tx.invitation.create({
+        data: {
+          workspaceId,
+          email,
+          role: requestedRole,
+          token: tokenHash,
+          invitedById: actorUserId,
+          status: "PENDING",
+          expiresAt,
+        },
+      });
+
+      // Record audit event without exposing recipient email or bearer token
+      await tx.activityEvent.create({
+        data: {
+          workspaceId,
+          userId: actorUserId,
+          action: "invitation.created",
+          entityType: "invitation",
+          entityId: created.id,
+          metadata: sanitizeActivityMetadata({
+            role: requestedRole,
+          }),
+        },
+      });
+
+      return created;
     });
 
     const inviteUrl = `${this.getBaseUrl()}/app/invitations/${rawToken}`;
@@ -421,11 +424,9 @@ export class InvitationService {
           action: "invitation.accepted",
           entityType: "workspace_member",
           entityId: invitation.workspaceId,
-          metadata: {
-            invitationId: invitation.id,
+          metadata: sanitizeActivityMetadata({
             role: invitation.role,
-            email: invitation.email,
-          },
+          }),
         },
       });
 
@@ -489,25 +490,27 @@ export class InvitationService {
       "ADMIN"
     );
 
-    const updated = await prisma.invitation.update({
-      where: { id: invitationId },
-      data: { status: "REVOKED" },
-    });
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.invitation.update({
+        where: { id: invitationId },
+        data: { status: "REVOKED" },
+      });
 
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId: invitation.workspaceId,
-        userId: actorUserId,
-        action: "invitation.revoked",
-        entityType: "invitation",
-        entityId: invitation.id,
-        metadata: {
-          recipientEmail: invitation.email,
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: invitation.workspaceId,
+          userId: actorUserId,
+          action: "invitation.revoked",
+          entityType: "invitation",
+          entityId: invitation.id,
+          metadata: sanitizeActivityMetadata({
+            role: invitation.role,
+          }),
         },
-      },
-    });
+      });
 
-    return updated;
+      return updated;
+    });
   }
 
   /**
@@ -534,26 +537,30 @@ export class InvitationService {
     const { rawToken, tokenHash } = this.generateSecureToken();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    const updated = await prisma.invitation.update({
-      where: { id: invitationId },
-      data: {
-        token: tokenHash,
-        status: "PENDING",
-        expiresAt,
-      },
-    });
-
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId: invitation.workspaceId,
-        userId: actorUserId,
-        action: "invitation.resent",
-        entityType: "invitation",
-        entityId: invitation.id,
-        metadata: {
-          recipientEmail: invitation.email,
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.invitation.update({
+        where: { id: invitationId },
+        data: {
+          token: tokenHash,
+          status: "PENDING",
+          expiresAt,
         },
-      },
+      });
+
+      await tx.activityEvent.create({
+        data: {
+          workspaceId: invitation.workspaceId,
+          userId: actorUserId,
+          action: "invitation.resent",
+          entityType: "invitation",
+          entityId: invitation.id,
+          metadata: sanitizeActivityMetadata({
+            role: invitation.role,
+          }),
+        },
+      });
+
+      return record;
     });
 
     const inviteUrl = `${this.getBaseUrl()}/app/invitations/${rawToken}`;

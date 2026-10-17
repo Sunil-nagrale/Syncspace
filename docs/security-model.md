@@ -199,5 +199,11 @@ SyncSpace enforces defense-in-depth for artifact file attachments across storage
   - Plain-text attachment previews are rendered as escaped text inside `<pre>` blocks and PDF previews use sandboxed `<iframe>` elements (`sandbox=""`).
 - **Rate & Concurrency Limiting**:
   - Pending attachment uploads are capped per user (`MAX_PENDING_UPLOADS_PER_USER = 5`) with automatic stale-upload cleanup, and total attachments per artifact are bounded (`MAX_ATTACHMENTS_PER_ARTIFACT = 50`).
-- **Audit Trail**:
-  - Critical mutations (role change, member removal, artifact deletion, invite issuance, attachment upload/deletion) create an immutable row in `ActivityEvent`.
+- **Audit Trail & Secure Workspace Activity Feed (`GET /api/workspaces/[workspaceId]/activity`)**:
+  - Meaningful user-visible mutations (artifact creation/metadata updates/archival/permission overrides, project creation/updates/archival, comment thread creation/replies/resolve/reopen/deletion, manual version checkpoints/version restores, verified attachment uploads/deletions/integrity quarantine, and workspace/member/invitation operations) create an immutable row in `ActivityEvent` inside the same database transaction as the mutation.
+  - Ordinary editor keystrokes and background snapshot autosaves (`contentSnapshot` updates without metadata changes) do not emit activity events.
+  - Activity event metadata is sanitized through `sanitizeActivityMetadata` (`src/lib/validations/activity.ts`), which allowlists safe primitive fields and rejects passwords, tokens, session/cookie data, presigned URLs, storage keys, SHA-256 digests, raw document/whiteboard snapshots, full comment bodies, and user email addresses.
+  - `ActivityService.listWorkspaceActivity` (`src/services/activity.service.ts`) enforces authenticated session verification (`401`) and active workspace membership (`404 NotFoundError` for non-members or removed members).
+  - Artifact-scoped events (artifacts, permissions, comments, versions, and attachments) are linked via `ActivityEvent.artifactId` (`ON DELETE CASCADE`) and joined against `"artifact"` and `"artifact_permission"`. Any event whose parent artifact has an explicit `ArtifactPermission` override with `role = 'NONE'` for the requesting user—or whose parent artifact was deleted—is excluded in SQL so restricted titles, filenames, entity IDs, and metadata are never leaked.
+  - Archived artifacts and archived projects have their titles, filenames, entity IDs, and navigation links (`targetUrl`) redacted on output so archived entities never leak protected content.
+  - Responses include `Cache-Control: private, no-store, max-age=0` and deterministic keyset cursor pagination (`createdAt DESC, id DESC`).
