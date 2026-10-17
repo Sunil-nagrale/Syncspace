@@ -71,13 +71,13 @@ export function isPlaceholderSecret(value: string | undefined): boolean {
 export function resolveAuthSecret(
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  const secret = env.BETTER_AUTH_SECRET?.trim();
-  const isProduction = env.NODE_ENV === "production";
-  const isBuildPhase = env.NEXT_PHASE === "phase-production-build";
-
-  if (isBuildPhase) {
+  // During build phase, unconditionally return ephemeral build secret without accessing BETTER_AUTH_SECRET
+  if (env.NEXT_PHASE === "phase-production-build") {
     return getEphemeralBuildSecret();
   }
+
+  const secret = env.BETTER_AUTH_SECRET?.trim();
+  const isProduction = env.NODE_ENV === "production";
 
   if (isProduction) {
     if (!secret) {

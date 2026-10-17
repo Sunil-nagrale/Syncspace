@@ -148,6 +148,23 @@ describe("Phase H.1 — Authentication Secret Production Hardening Tests", () =>
 
       expect(buildSecret.startsWith("ephemeral_build_")).toBe(true);
     });
+
+    it("does not access BETTER_AUTH_SECRET property at all during build phase", () => {
+      const throwingEnv = {
+        NODE_ENV: "production",
+        NEXT_PHASE: "phase-production-build",
+        get BETTER_AUTH_SECRET(): string {
+          throw new Error("BETTER_AUTH_SECRET was accessed during build phase!");
+        },
+      } as unknown as NodeJS.ProcessEnv;
+
+      let buildSecret: string | undefined;
+      expect(() => {
+        buildSecret = resolveAuthSecret(throwingEnv);
+      }).not.toThrow();
+      expect(buildSecret).toBeDefined();
+      expect(buildSecret!.startsWith("ephemeral_build_")).toBe(true);
+    });
   });
 
   describe("3. Development & Testing Ergonomics (NODE_ENV !== 'production')", () => {
