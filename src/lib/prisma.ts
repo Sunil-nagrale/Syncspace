@@ -8,9 +8,22 @@ const globalForPrisma = globalThis as unknown as {
   pool: Pool | undefined;
 };
 
-const connectionString =
-  process.env.DATABASE_URL ||
-  "postgresql://postgres:postgres@localhost:5432/syncspace?schema=public";
+function getDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.DATABASE_URL) {
+    return env.DATABASE_URL;
+  }
+  if (
+    env.NODE_ENV === "production" &&
+    env.NEXT_PHASE !== "phase-production-build"
+  ) {
+    throw new Error(
+      "[Security Configuration Error] Missing required environment variable DATABASE_URL in production."
+    );
+  }
+  return "postgresql://postgres:postgres@localhost:5432/syncspace?schema=public";
+}
+
+const connectionString = getDatabaseUrl();
 
 const pool =
   globalForPrisma.pool ??

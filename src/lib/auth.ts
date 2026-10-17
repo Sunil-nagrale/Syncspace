@@ -1,14 +1,15 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { prisma } from "@/lib/prisma";
+import { resolveAuthSecret } from "@/lib/auth-secret";
+
+export { resolveAuthSecret };
 
 export const auth = betterAuth({
   database: prismaAdapter(prisma, {
     provider: "postgresql",
   }),
-  secret:
-    process.env.BETTER_AUTH_SECRET ||
-    "syncspace_super_secret_development_encryption_key_2026",
+  secret: resolveAuthSecret(),
   baseURL:
     process.env.BETTER_AUTH_URL ||
     process.env.NEXT_PUBLIC_APP_URL ||
@@ -28,7 +29,7 @@ export const auth = betterAuth({
   },
   rateLimit: {
     window: 60,
-    max: 100,
+    max: 1000,
     customRules: {
       "/sign-up/email": {
         window: 60,
