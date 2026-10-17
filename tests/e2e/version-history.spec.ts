@@ -12,6 +12,19 @@ interface ExcalidrawElementSnapshot {
   height: number;
 }
 
+function normalizeSceneElements(elements: ExcalidrawElementSnapshot[]): ExcalidrawElementSnapshot[] {
+  return [...elements]
+    .map((el) => ({
+      id: el.id,
+      type: el.type,
+      x: Math.round(el.x),
+      y: Math.round(el.y),
+      width: Math.round(el.width),
+      height: Math.round(el.height),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
 async function getActiveSceneElements(page: Page): Promise<ExcalidrawElementSnapshot[]> {
   const container = page.getByTestId("excalidraw-canvas-container");
   await expect(container).toBeAttached();
@@ -478,16 +491,22 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
       .poll(async () => (await getActiveSceneElements(ownerPage)).length, { timeout: 25000 })
       .toBe(1);
 
-    // Verify Collaborator receives Milestone 1 element via live sync
-    await expect
-      .poll(async () => (await getActiveSceneElements(collabPage)).length, { timeout: 25000 })
-      .toBe(1);
+    // Capture complete relevant element snapshot for Milestone 1 deterministically
+    const expectedM1Snapshot = normalizeSceneElements(await getActiveSceneElements(ownerPage));
+    expect(expectedM1Snapshot).toHaveLength(1);
+    expect(expectedM1Snapshot[0].type).toBe("rectangle");
+    expect(expectedM1Snapshot[0].width).toBeGreaterThan(0);
+    expect(expectedM1Snapshot[0].height).toBeGreaterThan(0);
 
-    const m1OwnerElements = await getActiveSceneElements(ownerPage);
-    const m1CollabElements = await getActiveSceneElements(collabPage);
-    expect(m1OwnerElements[0].type).toBe("rectangle");
-    expect(m1CollabElements[0].id).toBe(m1OwnerElements[0].id);
-    expect(m1CollabElements[0].type).toBe("rectangle");
+    // Verify Collaborator receives exact Milestone 1 element snapshot via live sync
+    await expect
+      .poll(async () => normalizeSceneElements(await getActiveSceneElements(collabPage)), {
+        timeout: 25000,
+      })
+      .toEqual(expectedM1Snapshot);
+
+    const m1CollabSnapshot = normalizeSceneElements(await getActiveSceneElements(collabPage));
+    expect(m1CollabSnapshot).toEqual(expectedM1Snapshot);
 
     // Owner creates Checkpoint 1: Milestone 1
     await ownerPage.getByTestId("toggle-history-button").click();
@@ -517,21 +536,28 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
       timeout: 15000,
     });
 
-    // Verify Owner has 2 active elements
+    // Verify Owner has 2 active elements and capture current Milestone 2 scene
     await expect
       .poll(async () => (await getActiveSceneElements(ownerPage)).length, { timeout: 15000 })
       .toBe(2);
 
-    // Verify Collaborator receives second element via live sync
-    await expect
-      .poll(async () => (await getActiveSceneElements(collabPage)).length, { timeout: 15000 })
-      .toBe(2);
+    const m2OwnerScene = normalizeSceneElements(await getActiveSceneElements(ownerPage));
+    expect(m2OwnerScene).toHaveLength(2);
 
-    const m2OwnerElements = await getActiveSceneElements(ownerPage);
-    const m2CollabElements = await getActiveSceneElements(collabPage);
-    const displacedElement = m2OwnerElements.find((e) => e.id !== m1OwnerElements[0].id)!;
+    const displacedElement = m2OwnerScene.find((e) => e.id !== expectedM1Snapshot[0].id)!;
     expect(displacedElement).toBeDefined();
-    expect(m2CollabElements.some((e) => e.id === displacedElement.id)).toBe(true);
+    expect(displacedElement.type).toBe("arrow");
+    expect(displacedElement.width).toBeGreaterThan(0);
+
+    // Verify Collaborator receives second element and converges to exact Milestone 2 scene via live sync
+    await expect
+      .poll(async () => normalizeSceneElements(await getActiveSceneElements(collabPage)), {
+        timeout: 25000,
+      })
+      .toEqual(m2OwnerScene);
+
+    const m2CollabScene = normalizeSceneElements(await getActiveSceneElements(collabPage));
+    expect(m2CollabScene).toEqual(m2OwnerScene);
 
     // Owner creates Checkpoint 2: Milestone 2
     await ownerPage.getByTestId("toggle-history-button").click();
@@ -550,11 +576,11 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     await expect(ownerPage.getByText("Read-Only")).toBeVisible();
     await expect(ownerPage.getByText("Canvas Scene Metadata")).toBeVisible();
 
-    // Confirm preview did not mutate live canvas for either peer (both still have 2 elements)
-    const ownerPreviewActive = await getActiveSceneElements(ownerPage);
-    const collabPreviewActive = await getActiveSceneElements(collabPage);
-    expect(ownerPreviewActive.length).toBe(2);
-    expect(collabPreviewActive.length).toBe(2);
+    // Confirm preview did not mutate live canvas for either peer (both still have exact Milestone 2 scene)
+    const ownerPreviewActive = normalizeSceneElements(await getActiveSceneElements(ownerPage));
+    const collabPreviewActive = normalizeSceneElements(await getActiveSceneElements(collabPage));
+    expect(ownerPreviewActive).toEqual(m2OwnerScene);
+    expect(collabPreviewActive).toEqual(m2CollabScene);
     expect(ownerPreviewActive.some((e) => e.id === displacedElement.id)).toBe(true);
     expect(collabPreviewActive.some((e) => e.id === displacedElement.id)).toBe(true);
 
@@ -584,24 +610,38 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
 
     await expect(ownerPage.getByTestId("restore-success-alert")).toBeVisible({ timeout: 15000 });
 
-    // 8. Verify Owner editor displays restored Milestone 1 (displaced element absent)
+    // 8. Verify Owner editor displays restored Milestone 1 (displaced element absent, exact snapshot equality)
     await expect
-      .poll(async () => (await getActiveSceneElements(ownerPage)).length, { timeout: 25000 })
-      .toBe(1);
+      .poll(async () => normalizeSceneElements(await getActiveSceneElements(ownerPage)), {
+        timeout: 25000,
+      })
+      .toEqual(expectedM1Snapshot);
 
-    const restoredOwnerElements = await getActiveSceneElements(ownerPage);
-    expect(restoredOwnerElements[0].id).toBe(m1OwnerElements[0].id);
-    expect(restoredOwnerElements[0].type).toBe("rectangle");
+    const restoredOwnerElements = normalizeSceneElements(await getActiveSceneElements(ownerPage));
+    expect(restoredOwnerElements).toEqual(expectedM1Snapshot);
+    expect(restoredOwnerElements[0].id).toBe(expectedM1Snapshot[0].id);
+    expect(restoredOwnerElements[0].type).toBe(expectedM1Snapshot[0].type);
+    expect(restoredOwnerElements[0].x).toBe(expectedM1Snapshot[0].x);
+    expect(restoredOwnerElements[0].y).toBe(expectedM1Snapshot[0].y);
+    expect(restoredOwnerElements[0].width).toBe(expectedM1Snapshot[0].width);
+    expect(restoredOwnerElements[0].height).toBe(expectedM1Snapshot[0].height);
     expect(restoredOwnerElements.some((e) => e.id === displacedElement.id)).toBe(false);
 
-    // 9. Collaborator receives restored scene WITHOUT PAGE RELOAD
+    // 9. Collaborator receives restored scene WITHOUT PAGE RELOAD (exact snapshot equality)
     await expect
-      .poll(async () => (await getActiveSceneElements(collabPage)).length, { timeout: 25000 })
-      .toBe(1);
+      .poll(async () => normalizeSceneElements(await getActiveSceneElements(collabPage)), {
+        timeout: 25000,
+      })
+      .toEqual(expectedM1Snapshot);
 
-    const restoredCollabElements = await getActiveSceneElements(collabPage);
-    expect(restoredCollabElements[0].id).toBe(m1OwnerElements[0].id);
-    expect(restoredCollabElements[0].type).toBe("rectangle");
+    const restoredCollabElements = normalizeSceneElements(await getActiveSceneElements(collabPage));
+    expect(restoredCollabElements).toEqual(expectedM1Snapshot);
+    expect(restoredCollabElements[0].id).toBe(expectedM1Snapshot[0].id);
+    expect(restoredCollabElements[0].type).toBe(expectedM1Snapshot[0].type);
+    expect(restoredCollabElements[0].x).toBe(expectedM1Snapshot[0].x);
+    expect(restoredCollabElements[0].y).toBe(expectedM1Snapshot[0].y);
+    expect(restoredCollabElements[0].width).toBe(expectedM1Snapshot[0].width);
+    expect(restoredCollabElements[0].height).toBe(expectedM1Snapshot[0].height);
     expect(restoredCollabElements.some((e) => e.id === displacedElement.id)).toBe(false);
 
     await expect(collabPage.getByTestId("room-connection-status")).toContainText(
@@ -627,9 +667,19 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     await expect
       .poll(async () => (await getActiveSceneElements(collabPage)).length, { timeout: 25000 })
       .toBe(2);
+
+    const postEditCollabElements = normalizeSceneElements(await getActiveSceneElements(collabPage));
+
     await expect
-      .poll(async () => (await getActiveSceneElements(ownerPage)).length, { timeout: 25000 })
-      .toBe(2);
+      .poll(async () => normalizeSceneElements(await getActiveSceneElements(ownerPage)), {
+        timeout: 25000,
+      })
+      .toEqual(postEditCollabElements);
+
+    const postEditOwnerElements = normalizeSceneElements(await getActiveSceneElements(ownerPage));
+    expect(postEditOwnerElements).toEqual(postEditCollabElements);
+    expect(postEditOwnerElements.some((e) => e.id === expectedM1Snapshot[0].id)).toBe(true);
+    expect(postEditOwnerElements.some((e) => e.id === displacedElement.id)).toBe(false);
 
     // Reopen history drawer and verify monotonic history continuation (version 3 exists)
     await ownerPage.getByTestId("toggle-history-button").click();

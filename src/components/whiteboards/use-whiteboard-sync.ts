@@ -61,7 +61,9 @@ export function useWhiteboardSync(
 
   // Synchronization tracking refs to prevent echo and infinite loops
   const isApplyingRemoteUpdateRef = useRef(false);
-  const lastSyncedVersionsRef = useRef<Map<string, number>>(new Map());
+  const lastSyncedVersionsRef = useRef<
+    Map<string, { version: number; versionNonce: number }>
+  >(new Map());
   const hasInitializedFromStorageRef = useRef(false);
   const postgresSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -164,7 +166,10 @@ export function useWhiteboardSync(
       api.updateScene({ elements: restoredElements });
 
       for (const el of restoredElements) {
-        lastSyncedVersionsRef.current.set(el.id, el.version);
+        lastSyncedVersionsRef.current.set(el.id, {
+          version: el.version,
+          versionNonce: el.versionNonce,
+        });
       }
 
       if (typeof document !== "undefined") {
@@ -221,7 +226,10 @@ export function useWhiteboardSync(
         api.updateScene({ elements: storageElements });
 
         for (const el of storageElements) {
-          lastSyncedVersionsRef.current.set(el.id, el.version);
+          lastSyncedVersionsRef.current.set(el.id, {
+            version: el.version,
+            versionNonce: el.versionNonce,
+          });
         }
 
         if (typeof document !== "undefined") {
@@ -244,7 +252,10 @@ export function useWhiteboardSync(
         api.updateScene({ elements: initialEls });
 
         for (const el of initialEls) {
-          lastSyncedVersionsRef.current.set(el.id, el.version);
+          lastSyncedVersionsRef.current.set(el.id, {
+            version: el.version,
+            versionNonce: el.versionNonce,
+          });
         }
 
         if (typeof document !== "undefined") {
@@ -275,7 +286,7 @@ export function useWhiteboardSync(
   // Reconcile incoming remote updates from Liveblocks storage into Excalidraw canvas
   useEffect(() => {
     const api = excalidrawAPIRef.current;
-    if (!api || !elementsMap || isApplyingRemoteUpdateRef.current) return;
+    if (!api || !elementsMap) return;
 
     const remoteElements = extractElementsArray(elementsMap);
     if (remoteElements.length === 0) return;
@@ -312,7 +323,10 @@ export function useWhiteboardSync(
     api.updateScene({ elements: reconciled });
 
     for (const el of reconciled) {
-      lastSyncedVersionsRef.current.set(el.id, el.version);
+      lastSyncedVersionsRef.current.set(el.id, {
+        version: el.version,
+        versionNonce: el.versionNonce,
+      });
     }
 
     if (typeof document !== "undefined") {
@@ -339,10 +353,17 @@ export function useWhiteboardSync(
       const mutatedElements: ExcalidrawElement[] = [];
 
       for (const el of elements) {
-        const lastVersion = lastSyncedVersionsRef.current.get(el.id);
-        if (lastVersion === undefined || el.version > lastVersion) {
+        const last = lastSyncedVersionsRef.current.get(el.id);
+        if (
+          !last ||
+          el.version > last.version ||
+          (el.version === last.version && el.versionNonce !== last.versionNonce)
+        ) {
           mutatedElements.push(el);
-          lastSyncedVersionsRef.current.set(el.id, el.version);
+          lastSyncedVersionsRef.current.set(el.id, {
+            version: el.version,
+            versionNonce: el.versionNonce,
+          });
         }
       }
 

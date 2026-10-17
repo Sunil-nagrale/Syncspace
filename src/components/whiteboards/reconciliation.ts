@@ -225,7 +225,14 @@ export function reconcileElementPair(
     return local.version > remote.version ? local : remote;
   }
 
-  // When versions are identical, lower versionNonce wins (Excalidraw standard)
+  // When versions are identical, compare updated timestamp before tie-breaking nonce
+  const localUpdated = local.updated ?? 0;
+  const remoteUpdated = remote.updated ?? 0;
+  if (localUpdated !== remoteUpdated) {
+    return localUpdated > remoteUpdated ? local : remote;
+  }
+
+  // When versions and timestamps are identical, lower versionNonce wins (Excalidraw standard)
   return local.versionNonce <= remote.versionNonce ? local : remote;
 }
 
