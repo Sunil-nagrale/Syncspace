@@ -7,6 +7,7 @@ import {
   ConflictError,
 } from "./authorization.service";
 import { validateSnapshotPayload } from "@/lib/validations/version";
+import { extractArtifactSearchText } from "@/lib/validations/search";
 import { createHash } from "crypto";
 
 export interface ListVersionsOptions {
@@ -319,6 +320,7 @@ export class VersionService {
             where: { id: artifactId },
             data: {
               currentSnapshot: snapshotToSave as unknown as Prisma.InputJsonValue,
+              searchText: extractArtifactSearchText(lockedArtifact.type, snapshotToSave),
               currentRevision: { increment: 1 },
               updatedById: userId,
             },
@@ -495,6 +497,7 @@ export class VersionService {
             data: {
               title: restoredTitle,
               currentSnapshot: restoredSnapshot as unknown as Prisma.InputJsonValue,
+              searchText: extractArtifactSearchText(lockedArtifact.type, restoredSnapshot),
               currentRevision: { increment: 1 },
               updatedById: userId,
             },

@@ -226,6 +226,7 @@ model Artifact {
 
   currentSnapshot  Json?
   currentRevision  Int          @default(1)
+  searchText       String       @default("")
 
   permissions ArtifactPermission[]
   versions    ArtifactVersion[]

@@ -4,6 +4,7 @@ import {
   AuthorizationError,
 } from "./authorization.service";
 import { computeSnapshotHash } from "./version.service";
+import { extractArtifactSearchText } from "@/lib/validations/search";
 import { Artifact, ArtifactType } from "@prisma/client";
 import { randomBytes } from "crypto";
 
@@ -118,6 +119,12 @@ export class ArtifactService {
         ...(filter?.projectId !== undefined ? { projectId: filter.projectId } : {}),
         ...(filter?.type !== undefined ? { type: filter.type } : {}),
         isArchived: filter?.isArchived ?? false,
+        permissions: {
+          none: {
+            userId,
+            role: "NONE",
+          },
+        },
       },
       include: {
         createdBy: {
@@ -246,6 +253,10 @@ export class ArtifactService {
 
     const hasSnapshot = input.contentSnapshot && typeof input.contentSnapshot === "object";
     const safeSnapshot = hasSnapshot ? JSON.parse(JSON.stringify(input.contentSnapshot)) : undefined;
+    const extractedSearchText =
+      safeSnapshot !== undefined
+        ? extractArtifactSearchText(artifact.type, safeSnapshot)
+        : undefined;
 
     let updated: Artifact | undefined;
 
@@ -277,6 +288,7 @@ export class ArtifactService {
                 ...(input.isArchived !== undefined ? { isArchived: input.isArchived } : {}),
                 ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
                 currentSnapshot: safeSnapshot,
+                searchText: extractedSearchText ?? "",
                 currentRevision: { increment: 1 },
                 updatedById: userId,
               },

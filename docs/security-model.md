@@ -182,7 +182,16 @@ SyncSpace enforces defense-in-depth for artifact file attachments across storage
 
 ---
 
-## 8. Validation, Sanitization & Input Defense
+## 8. Permission-Scoped Full-Text Search & Command Palette (Phase 10A)
+
+- **Server-Side Authentication & Workspace Scoping**: `GET /api/search` (`SearchService.search`) requires an active authenticated session (`401 Unauthorized` otherwise). If a `workspaceId` filter is supplied, membership is verified via `AuthorizationService.requireWorkspaceAccess(userId, workspaceId, "VIEWER")`, returning `404 NotFoundError` for unauthorized workspaces to prevent tenant enumeration.
+- **Artifact-Level Access Control (`ArtifactPermission`)**: Search queries join `WorkspaceMember` and `ArtifactPermission` directly in PostgreSQL and exclude any artifact where the user has an explicit `role = 'NONE'` override (`ap."id" IS NULL OR ap."role" <> 'NONE'`), as well as archived artifacts (`a."isArchived" = false`) and archived projects (`p."isArchived" = false`).
+- **Parameterized Full-Text & Trigram Queries**: All PostgreSQL `websearch_to_tsquery`, sanitized prefix `to_tsquery`, `ILIKE` (with escaped `%`, `_`, `\` wildcards), and `pg_trgm` `word_similarity` expressions are bound via parameterized `Prisma.sql` queries. Search query length (`<= 200` chars), pagination limit (`1..50`), and cursor offset (`0..1000`) are strictly validated via `searchQuerySchema`.
+- **Non-Leaking Excerpts**: Result snippets (`buildSafeSearchExcerpt`) are generated exclusively from already-authorized rows, normalized to plain text (stripping control characters and raw JSON structure), and bounded to 180 characters. Responses include `Cache-Control: private, no-store, max-age=0`.
+
+---
+
+## 9. Validation, Sanitization & Input Defense
 
 - **Zod Schema Validation**: Every API route handler and Server Action validates incoming payloads using strict Zod schemas.
 - **XSS Sanitization**:

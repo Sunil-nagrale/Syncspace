@@ -54,6 +54,7 @@ export function Header({
         <Button
           variant="outline"
           size="sm"
+          data-testid="header-search-trigger"
           onClick={onOpenSearch}
           className="hidden md:flex h-8 gap-2 px-2.5 text-xs text-muted-foreground hover:text-foreground"
         >
