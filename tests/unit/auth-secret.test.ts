@@ -75,6 +75,17 @@ describe("Phase H.1 — Authentication Secret Production Hardening Tests", () =>
       ).toThrow(`must be at least ${MINIMUM_SECRET_LENGTH} characters long`);
     });
 
+    it("strictly rejects an ephemeral build secret passed as BETTER_AUTH_SECRET at production runtime", () => {
+      const ephemeralSecret =
+        "ephemeral_build_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      expect(() =>
+        resolveAuthSecret({
+          NODE_ENV: "production",
+          BETTER_AUTH_SECRET: ephemeralSecret,
+        })
+      ).toThrow("Insecure or placeholder BETTER_AUTH_SECRET detected in production");
+    });
+
     it("accepts strong, unpredictable secrets in production runtime", () => {
       const resolved = resolveAuthSecret({
         NODE_ENV: "production",
@@ -82,6 +93,7 @@ describe("Phase H.1 — Authentication Secret Production Hardening Tests", () =>
       });
 
       expect(resolved).toBe(validProductionSecret);
+      expect(resolved.startsWith("ephemeral_build_")).toBe(false);
     });
   });
 
@@ -115,14 +127,26 @@ describe("Phase H.1 — Authentication Secret Production Hardening Tests", () =>
       expect(buildSecret3.startsWith("ephemeral_build_")).toBe(true);
     });
 
-    it("preserves valid secret if provided during build phase", () => {
+    it("always uses an ephemeral secret during build phase, even when a valid production secret is configured", () => {
       const buildSecret = resolveAuthSecret({
         NODE_ENV: "production",
         NEXT_PHASE: "phase-production-build",
         BETTER_AUTH_SECRET: validProductionSecret,
       });
 
-      expect(buildSecret).toBe(validProductionSecret);
+      expect(buildSecret).not.toBe(validProductionSecret);
+      expect(buildSecret.startsWith("ephemeral_build_")).toBe(true);
+      expect(buildSecret.length).toBeGreaterThanOrEqual(MINIMUM_SECRET_LENGTH);
+    });
+
+    it("strictly isolates build phase even in non-production environments", () => {
+      const buildSecret = resolveAuthSecret({
+        NODE_ENV: "development",
+        NEXT_PHASE: "phase-production-build",
+        BETTER_AUTH_SECRET: "some_development_secret_min_32_chars_long",
+      });
+
+      expect(buildSecret.startsWith("ephemeral_build_")).toBe(true);
     });
   });
 
@@ -156,6 +180,7 @@ describe("Phase H.1 — Authentication Secret Production Hardening Tests", () =>
       expect(isPlaceholderSecret("changeme")).toBe(true);
       expect(isPlaceholderSecret("your-bucket-or-key")).toBe(true);
       expect(isPlaceholderSecret(INSECURE_DEFAULT_SECRET)).toBe(true);
+      expect(isPlaceholderSecret("ephemeral_build_0123456789abcdef")).toBe(true);
 
       expect(isPlaceholderSecret(validProductionSecret)).toBe(false);
       expect(isPlaceholderSecret("Kj8#vL9$mQ2!zR5*tY7@wP1&sX4^uN6~")).toBe(false);

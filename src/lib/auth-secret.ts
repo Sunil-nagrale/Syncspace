@@ -44,7 +44,8 @@ export function isPlaceholderSecret(value: string | undefined): boolean {
     trimmed.startsWith("placeholder") ||
     trimmed.startsWith("changeme") ||
     trimmed.startsWith("your-") ||
-    trimmed.startsWith("your_")
+    trimmed.startsWith("your_") ||
+    trimmed.startsWith("ephemeral_build_")
   );
 }
 
@@ -52,17 +53,17 @@ export function isPlaceholderSecret(value: string | undefined): boolean {
  * Resolves and validates the Better Auth encryption secret for the current environment.
  *
  * Rules:
- * 1. In production runtime (NODE_ENV === "production" and NEXT_PHASE !== "phase-production-build"):
+ * 1. In production build phase (NEXT_PHASE === "phase-production-build"):
+ *    - ALWAYS returns a cryptographically random, in-memory ephemeral secret.
+ *    - Even if BETTER_AUTH_SECRET is configured in the environment, it is never used.
+ *    - This completely isolates real production secrets from build artifacts, traces,
+ *      and memory space of the build process.
+ * 2. In production runtime (NODE_ENV === "production" and NEXT_PHASE !== "phase-production-build"):
  *    - BETTER_AUTH_SECRET MUST be set in environment variables.
  *    - It CANNOT be the hardcoded development secret.
- *    - It CANNOT be a placeholder.
+ *    - It CANNOT be a placeholder or an ephemeral build secret.
  *    - It MUST be at least 32 characters in length.
  *    - Violation throws an AuthConfigurationError and aborts execution.
- * 2. In production build phase (NEXT_PHASE === "phase-production-build"):
- *    - If a valid secret is provided, it is returned.
- *    - If missing or placeholder during build phase, a cryptographically random ephemeral key
- *      is generated in-memory so Next.js static page collection and bundling succeed without
- *      requiring production secrets at build time or leaking predictable tokens.
  * 3. In non-production (development, test):
  *    - If BETTER_AUTH_SECRET is provided, it is used.
  *    - If absent, a development-only fallback key is used so local setup and vitest run smoothly.
@@ -74,18 +75,11 @@ export function resolveAuthSecret(
   const isProduction = env.NODE_ENV === "production";
   const isBuildPhase = env.NEXT_PHASE === "phase-production-build";
 
-  if (isProduction) {
-    if (isBuildPhase) {
-      if (
-        secret &&
-        secret.length >= MINIMUM_SECRET_LENGTH &&
-        !isPlaceholderSecret(secret)
-      ) {
-        return secret;
-      }
-      return getEphemeralBuildSecret();
-    }
+  if (isBuildPhase) {
+    return getEphemeralBuildSecret();
+  }
 
+  if (isProduction) {
     if (!secret) {
       throw new AuthConfigurationError(
         "[Security Configuration Error] Missing required environment variable BETTER_AUTH_SECRET in production. " +
