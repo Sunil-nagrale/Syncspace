@@ -158,3 +158,20 @@ A development phase cannot be considered complete until:
 - 100% of unit and integration tests pass.
 - No TypeScript warnings or `any` bypasses exist.
 - Multi-client collaboration behavior has been demonstrated on real browser instances.
+
+---
+
+## 6. Phase 9B — Secure File Attachment Test Coverage
+
+- **Unit Tests (`tests/unit/attachments.test.ts`)**:
+  - Allowlisted MIME types (`application/pdf`, `image/png`, `image/jpeg`, `image/webp`, `text/plain`, `text/csv`) and 10 MiB size limits.
+  - Magic-byte signature verification and rejection of disguised executables (`MZ`, `ELF`, `Mach-O`), scripts, SVG, and HTML payloads.
+  - Filename sanitization, RFC 5987 `Content-Disposition` header generation, and unpredictable storage-key generation.
+  - Storage adapter behavior (`LocalFileStorageProvider`, `InMemoryStorageProvider`, `S3StorageProvider`, and fail-closed production resolution).
+- **PostgreSQL Integration Tests (`tests/integration/attachments.test.ts`)**:
+  - Pending upload initiation, object verification on completion, idempotent duplicate completion, and `storageKey` confidentiality.
+  - Authorized listing, inline preview, download with security headers, and uploader/admin deletion policy.
+  - Cross-workspace and cross-artifact IDOR rejection, explicit `NONE` and `VIEWER` overrides, and immediate membership revocation.
+  - Two-phase `DELETING` cleanup under simulated storage failure and independence from document/whiteboard version restoration.
+- **Playwright E2E Tests (`tests/e2e/attachments.spec.ts`)**:
+  - End-to-end browser upload, list rendering, safe preview dialog, download with SHA-256 checksum verification, unsupported/oversized file rejection, viewer/outsider/`NONE`-override RBAC enforcement, and confirmed deletion.

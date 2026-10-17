@@ -17,9 +17,11 @@ import {
   FileText,
   MessageSquare,
   History,
+  Paperclip,
 } from "lucide-react";
 import { ArtifactDiscussionPanel } from "@/components/comments/artifact-discussion-panel";
 import { VersionHistoryDrawer } from "@/components/versions/version-history-drawer";
+import { AttachmentDrawer } from "@/components/attachments/attachment-drawer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -290,6 +292,8 @@ function WhiteboardWorkspaceLayout({
 
   // Version history state
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isAttachmentsOpen, setIsAttachmentsOpen] = useState(false);
+  const [attachmentCount, setAttachmentCount] = useState<number | null>(null);
   const [currentRevision, setCurrentRevision] = useState(propRevision ?? 1);
 
   const handleRestoreWhiteboard = useCallback(
@@ -694,6 +698,26 @@ function WhiteboardWorkspaceLayout({
               )}
             </Button>
 
+            {/* Attachments Toggle Button */}
+            <Button
+              size="sm"
+              variant={isAttachmentsOpen ? "secondary" : "outline"}
+              className="h-7 text-xs gap-1.5"
+              onClick={() => setIsAttachmentsOpen(!isAttachmentsOpen)}
+              data-testid="toggle-attachments-button"
+            >
+              <Paperclip className="h-3 w-3" />
+              <span className="hidden sm:inline">Files</span>
+              {attachmentCount !== null && attachmentCount > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="text-[10px] h-4 px-1 py-0 font-normal bg-brand-indigo/15 text-brand-indigo"
+                >
+                  {attachmentCount}
+                </Badge>
+              )}
+            </Button>
+
             {/* Version History Toggle Button */}
             <Button
               size="sm"
@@ -895,6 +919,17 @@ function WhiteboardWorkspaceLayout({
           onRestore={handleRestoreWhiteboard}
           isOpen={isHistoryOpen}
           onClose={() => setIsHistoryOpen(false)}
+        />
+
+        {/* File Attachments Drawer */}
+        <AttachmentDrawer
+          artifactId={whiteboardId}
+          artifactType="WHITEBOARD"
+          canEdit={canEdit}
+          isOpen={isAttachmentsOpen}
+          onClose={() => setIsAttachmentsOpen(false)}
+          onCountChange={setAttachmentCount}
+          isDemoMode={isDemoMode}
         />
       </div>
     </TooltipProvider>

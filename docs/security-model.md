@@ -149,38 +149,41 @@ When an Admin or Owner revokes a user's membership:
 ---
 
 
-## 7. Secure File Storage & Presigned URLs
+## 7. Secure File Attachments & Private Storage (Phase 9B)
 
-SyncSpace never proxies heavy file bytes directly through Next.js server processes. It uses S3-compatible presigned URLs.
+SyncSpace enforces defense-in-depth for artifact file attachments across storage isolation, content validation, and per-request RBAC re-verification.
 
-### 7.1 Upload Lifecycle
-1. User selects a file to attach.
-2. Client sends a request to `/api/attachments/presign-upload` with `fileName`, `fileSize`, `mimeType`, and `artifactId`.
-3. Server validates:
-   - User has `EDITOR`, `ADMIN`, or `OWNER` permission on `artifactId`.
-   - `fileSize` <= 25 MB.
-   - `mimeType` matches permitted whitelist (`image/png`, `image/jpeg`, `image/webp`, `image/svg+xml`, `application/pdf`, `text/plain`).
-4. Server generates an S3 `PutObjectCommand` presigned URL with a 5-minute expiration:
-   ```typescript
-   const presignedUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-   ```
-5. Client uploads directly to S3 via HTTP `PUT`.
-6. Client notifies `/api/attachments/complete` to persist the `Attachment` database record.
+### 7.1 Private Storage & Fail-Closed Production Policy
+- **Private Bucket / Outside Web Root**: In production (`STORAGE_PROVIDER=s3`), objects are stored in a private S3-compatible bucket with public access blocked. In local development (`STORAGE_PROVIDER=local`), objects are stored in `.storage/attachments` outside the `public/` directory.
+- **Fail-Closed Production Startup**: If `NODE_ENV=production` and S3 credentials/bucket are missing, set to placeholders, or configured to use `local`/`memory`, the storage layer fails closed with `StorageConfigurationError` (`HTTP 503`).
+- **Unpredictable Object Keys**: Storage keys (`workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{uuid}-{hex}`) never incorporate user-supplied filenames, preventing path traversal and key guessing.
 
-### 7.2 Download Lifecycle
-- Files in the S3 bucket are marked strictly **private** (no public read permissions).
-- To view or download an attachment, the client requests a presigned GET URL from `/api/attachments/[id]/download`.
-- Server verifies the user currently has read permission on the associated artifact before generating a signed GET URL valid for 60 seconds.
+### 7.2 File Format Allowlist, Size Limit & Signature Verification
+- **Maximum Size**: Strictly enforced at **10 MiB** (`10,485,760` bytes) on the server during both initiation and stored-object verification.
+- **Allowlisted Formats**:
+  - `application/pdf` (`.pdf` — verified `%PDF-` magic header)
+  - `image/png` (`.png` — verified 8-byte PNG signature)
+  - `image/jpeg` (`.jpg` / `.jpeg` — verified `FF D8 FF` JPEG SOI marker)
+  - `image/webp` (`.webp` — verified `RIFF....WEBP` header)
+  - `text/plain` (`.txt` — verified valid UTF-8, no null/control bytes, no active HTML/SVG/JS patterns)
+  - `text/csv` (`.csv` — verified valid UTF-8, no null/control bytes, no active HTML/SVG/JS patterns; always served as `attachment`, never `inline`)
+- **Active Content & Executable Rejection**: Executable binaries (Windows PE `MZ`, Linux `ELF`, Mach-O), scripts (`.js`, `.sh`, `.ps1`, `.bat`), HTML (`.html`), and SVG (`.svg`) are strictly rejected even when disguised with an allowed extension or MIME type.
+- **Malware Scanning Limitation**: Built-in validation performs magic-byte signature verification, UTF-8 structural checks, and active-content pattern rejection, but **does not include an external antivirus/malware scanning engine** (such as ClamAV or cloud object scanning). Deployments handling untrusted external files should integrate asynchronous bucket malware scanning before promoting objects or restrict uploads to trusted workspace editors.
+
+### 7.3 Permission-Aware Downloads, Previews & Two-Phase Deletion
+- **Every-Request Authorization**: Listing (`GET /api/artifacts/[artifactId]/attachments`) and downloading (`GET /api/artifacts/[artifactId]/attachments/[attachmentId]/download`) call `AuthorizationService.requireArtifactAccess(userId, artifactId, "VIEW")` on every request. Explicit `NONE` overrides, archived artifacts, and revoked workspace memberships take effect immediately.
+- **Safe Response Headers**: Downloads set `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store, max-age=0`, `Content-Security-Policy: default-src 'none'; ...; sandbox`, and RFC 5987 sanitized `Content-Disposition` headers.
+- **Deletion Policy & Cleanup**: Only the original uploader (while retaining `EDIT` access) or a workspace `OWNER`/`ADMIN` can delete an attachment. Deletion marks the record `DELETING` before removing the storage blob so storage errors never leave an attachment downloadable or falsely report success.
 
 ---
 
 ## 8. Validation, Sanitization & Input Defense
 
-- **Zod Schema Validation**: Every API route handler and Server Action validates incoming payloads using strict Zod schemas with `.strip()` to reject unknown fields.
+- **Zod Schema Validation**: Every API route handler and Server Action validates incoming payloads using strict Zod schemas.
 - **XSS Sanitization**:
   - Tiptap JSON output is rendered via Tiptap’s sanitized schema serializer.
-  - Any raw HTML export or preview is processed through `DOMPurify` before DOM injection.
-- **Rate Limiting**:
-  - Sensitive endpoints (`/api/auth/*`, `/api/invitations/*`, `/api/attachments/presign-upload`) are protected with token-bucket rate limiting (in-memory or Redis-backed) to prevent credential stuffing and resource exhaustion.
+  - Plain-text attachment previews are rendered as escaped text inside `<pre>` blocks and PDF previews use sandboxed `<iframe>` elements (`sandbox=""`).
+- **Rate & Concurrency Limiting**:
+  - Pending attachment uploads are capped per user (`MAX_PENDING_UPLOADS_PER_USER = 5`) with automatic stale-upload cleanup, and total attachments per artifact are bounded (`MAX_ATTACHMENTS_PER_ARTIFACT = 50`).
 - **Audit Trail**:
-  - All critical mutations (role change, member removal, artifact deletion, invite issuance) create an immutable row in `ActivityEvent`.
+  - Critical mutations (role change, member removal, artifact deletion, invite issuance, attachment upload/deletion) create an immutable row in `ActivityEvent`.

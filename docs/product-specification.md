@@ -220,7 +220,7 @@ SyncSpace takes inspiration from:
 1. **In-App Notifications**: Notification center showing unread mentions, comment replies, project invitations, and document updates.
 2. **Global Command Palette (`Cmd+K` / `Ctrl+K`)**: Rapid fuzzy-search across all documents, whiteboards, projects, and actions.
 3. **Full-Text Search**: Search document headings, body copy, whiteboard text elements, and project titles.
-4. **File Attachments**: File upload drawer supporting PDF, images, diagrams, and code snippets, stored in S3 with presigned secure download URLs.
+4. **File Attachments**: Dedicated attachment drawer on both Documents and Whiteboards supporting allowlisted business formats (`PDF`, `PNG`, `JPEG`, `WebP`, `TXT`, `CSV` up to `10 MiB` per file), magic-byte content validation, private object storage (`S3StorageProvider` / `LocalFileStorageProvider`), permission-enforced downloads and safe previews, and two-phase deletion with confirmation.
 5. **Activity Log**: Workspace-wide audit trail of user actions with entity links and relative timestamps.
 6. **User Preferences & Themes**: Light and dark themes with system preference detection and seamless CSS token switching.
 7. **Responsive Shell**: Collapsible sidebar, mobile drawer navigation, breadcrumb navigation, and adaptive canvas layouts.
@@ -235,7 +235,7 @@ SyncSpace takes inspiration from:
 | **Workspaces** | Multi-workspace, Projects, Member Roles (Owner, Admin, Editor, Viewer), Invites | Workspace billing, custom domain mapping |
 | **Documents** | Tiptap rich-text, slash commands, headings, tables, code blocks, task lists, Yjs live cursors, comments, export to Markdown/HTML | AI text autocomplete, LaTeX equation editor, nested sub-pages tree |
 | **Whiteboards** | Excalidraw canvas, shape drawing, arrows, text, image insertion, Liveblocks LiveMap sync, reconcileElements, PNG/SVG export | Custom shape libraries, AI sketch-to-diagram |
-| **Permissions** | Workspace-level RBAC + Artifact-level role overrides (Editor, Viewer) | Granular folder inheritance rules, public view links with passwords |
+| **Permissions** | Workspace-level RBAC + Artifact-level role overrides (Editor, Viewer, None) | Granular folder inheritance rules, public view links with passwords |
 | **Search & Nav** | Global Command Palette (Cmd+K), PostgreSQL full-text search, recent items | Semantic vector search (pgvector), OCR on whiteboard images |
-| **Attachments** | S3-compatible private upload/download via presigned URLs (up to 25MB) | In-app video playback, audio notes, 500MB uploads |
-| **History** | Periodic manual & auto-snapshots (ArtifactVersion), restore snapshot | Visual side-by-side line diff viewer, branch/merge documents |
+| **Attachments** | Private storage abstraction (`s3`/`local`/`memory`), 10 MiB limit, magic-byte validation (`PDF`, `PNG`, `JPEG`, `WebP`, `TXT`, `CSV`), RBAC download/preview & two-phase deletion | In-app video playback, audio notes, cloud antivirus scanning, 500MB uploads |
+| **History** | Periodic manual & auto-snapshots (ArtifactVersion), atomic restore snapshot | Visual side-by-side line diff viewer, branch/merge documents |

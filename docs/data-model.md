@@ -423,3 +423,49 @@ model ArtifactVersion {
 2. **Optimistic Concurrency**: Restore operations accept `expectedRevision`. If the artifact's current revision does not match `expectedRevision`, the server rejects with HTTP 409 Conflict.
 3. **Displaced State Preservation**: If restoring a version when the current active state contains unsaved changes differing from the latest version, a `RESTORE_RECOVERY` checkpoint is atomically created before restoration.
 4. **Monotonic Restoration**: Restoring creates a new `RESTORED` version entry with sequential `versionNumber = max(versionNumber) + 1` and `restoredFromVersion` linking to the restored source, preserving a clear timeline audit trail.
+
+---
+
+## 9. Secure File Attachment Model (Phase 9B)
+
+The existing `Attachment` model is extended with explicit lifecycle state tracking (`AttachmentStatus`), integrity checksums (`sha256`), failure diagnostics (`failureReason`), unique storage keys, and composite indexes:
+
+```prisma
+enum AttachmentStatus {
+  PENDING
+  READY
+  FAILED
+  DELETING
+}
+
+model Attachment {
+  id            String           @id @default(cuid())
+  workspaceId   String
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId    String?
+  artifact      Artifact?        @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  fileName      String
+  fileType      String
+  fileSize      Int
+  storageKey    String           @unique
+  publicUrl     String?
+  status        AttachmentStatus @default(PENDING)
+  sha256        String?
+  failureReason String?
+  uploadedById  String
+  uploadedBy    User             @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id], onDelete: Cascade)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @default(now()) @updatedAt
+
+  @@index([workspaceId])
+  @@index([artifactId])
+  @@index([artifactId, status, createdAt])
+  @@index([uploadedById, status])
+  @@map("attachment")
+}
+```
+
+### Lifecycle & Integrity Invariants
+- **`storageKey` Confidentiality**: `storageKey` is unique, generated using cryptographic randomness (`workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{uuid}-{randomHex}`), never derived from user filenames, and never serialized to client API responses.
+- **No Permanent Public URLs**: `publicUrl` remains `null` for private attachments; expiring signed URLs are never persisted as permanent URLs.
+- **Version Restore Independence**: Attachments are associated with `Artifact.id` rather than `ArtifactVersion.snapshotData`, ensuring attached files remain intact when a document or whiteboard is edited or restored to an earlier version.

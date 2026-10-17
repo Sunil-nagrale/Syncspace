@@ -284,23 +284,36 @@ model ArtifactVersion {
   @@map("artifact_version")
 }
 
+enum AttachmentStatus {
+  PENDING
+  READY
+  FAILED
+  DELETING
+}
+
 model Attachment {
-  id          String    @id @default(cuid())
-  workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  artifactId  String?
-  artifact    Artifact? @relation(fields: [artifactId], references: [id], onDelete: Cascade)
-  fileName    String
-  fileType    String
-  fileSize    Int
-  storageKey  String
-  publicUrl   String?
-  uploadedById String
-  uploadedBy  User      @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id], onDelete: Cascade)
-  createdAt   DateTime  @default(now())
+  id            String           @id @default(cuid())
+  workspaceId   String
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifactId    String?
+  artifact      Artifact?        @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  fileName      String
+  fileType      String
+  fileSize      Int
+  storageKey    String           @unique
+  publicUrl     String?
+  status        AttachmentStatus @default(PENDING)
+  sha256        String?
+  failureReason String?
+  uploadedById  String
+  uploadedBy    User             @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id], onDelete: Cascade)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @default(now()) @updatedAt
 
   @@index([workspaceId])
   @@index([artifactId])
+  @@index([artifactId, status, createdAt])
+  @@index([uploadedById, status])
   @@map("attachment")
 }
 

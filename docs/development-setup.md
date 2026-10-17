@@ -122,6 +122,8 @@ npm.cmd run test:e2e
 npx.cmd playwright test tests/e2e/invitations-and-sharing.spec.ts
 npx.cmd playwright test tests/e2e/collaborative-whiteboards.spec.ts
 npx.cmd playwright test tests/e2e/collaborative-documents.spec.ts
+npx.cmd playwright test tests/e2e/version-history.spec.ts
+npx.cmd playwright test tests/e2e/attachments.spec.ts
 npx.cmd playwright test tests/e2e/auth-and-workspaces.spec.ts
 ```
 
@@ -132,7 +134,16 @@ npm.cmd run build
 
 ---
 
-## 5. Transactional Email Delivery Setup (Optional)
+## 5. Private Object Storage Setup (Phase 9B)
+
+SyncSpace supports three storage providers via `STORAGE_PROVIDER`:
+- **Local Development (`STORAGE_PROVIDER=local`)**: Stores private attachment blobs in `.storage/attachments` (outside `public/`). No cloud credentials are required for local development.
+- **Automated Tests (`STORAGE_PROVIDER=memory`)**: Uses `InMemoryStorageProvider` with fault-injection capabilities for unit and integration tests.
+- **Production Deployment (`STORAGE_PROVIDER=s3`)**: Requires private S3-compatible storage (`S3_BUCKET_NAME`, `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`). Production builds fail closed if S3 is not properly configured.
+
+---
+
+## 6. Transactional Email Delivery Setup (Optional)
 
 When no transactional email provider is configured, SyncSpace automatically operates in **Secure Copyable Link Mode**:
 - Workspace administrators receive an encrypted, copyable invitation link upon invitation generation.
@@ -156,7 +167,7 @@ SMTP_FROM=invitations@yourdomain.com
 
 ---
 
-## 5. Troubleshooting & FAQ
+## 7. Troubleshooting & FAQ
 
 1. **Hydration Warning in Browser Console**:
    - `next-themes` applies `dark` class to `<html>` tags dynamically. The root `<html>` element includes `suppressHydrationWarning` in `src/app/layout.tsx` to handle theme attribute synchronization cleanly.

@@ -41,3 +41,6 @@ Thumbs.db
 .vscode/
 *.tsbuildinfo
 next-env.d.ts
+
+# Local private object storage (development & test artifacts)
+.storage/

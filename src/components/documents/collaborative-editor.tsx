@@ -59,6 +59,7 @@ import {
   Trash2,
   Copy,
   Shield,
+  Paperclip,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -93,6 +94,7 @@ import {
 } from "./editor-extensions";
 import { ArtifactDiscussionPanel } from "@/components/comments/artifact-discussion-panel";
 import { VersionHistoryDrawer } from "@/components/versions/version-history-drawer";
+import { AttachmentDrawer } from "@/components/attachments/attachment-drawer";
 
 export interface CollaborativeDocumentProps {
   documentId: string;
@@ -406,6 +408,8 @@ function RichTextDocumentWorkspace({
   const [showOutline, setShowOutline] = useState(true);
   const [showCommentsDrawer, setShowCommentsDrawer] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
+  const [showAttachmentsDrawer, setShowAttachmentsDrawer] = useState(false);
+  const [attachmentCount, setAttachmentCount] = useState<number | null>(null);
   const [currentRevision, setCurrentRevision] = useState(propRevision ?? 1);
 
   useEffect(() => {
@@ -1027,6 +1031,33 @@ function RichTextDocumentWorkspace({
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
               Contextual Discussions
+            </TooltipContent>
+          </Tooltip>
+
+          {/* Attachments Entry Point */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant={showAttachmentsDrawer ? "secondary" : "ghost"}
+                className="h-7 px-2 text-xs gap-1"
+                onClick={() => setShowAttachmentsDrawer((v) => !v)}
+                data-testid="toggle-attachments-button"
+              >
+                <Paperclip className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Files</span>
+                {attachmentCount !== null && attachmentCount > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="text-[10px] h-4 px-1 py-0 font-normal bg-brand-indigo/15 text-brand-indigo"
+                  >
+                    {attachmentCount}
+                  </Badge>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              File Attachments
             </TooltipContent>
           </Tooltip>
 
@@ -1957,6 +1988,17 @@ function RichTextDocumentWorkspace({
           onRestore={handleRestoreDocument}
           isOpen={showHistoryDrawer}
           onClose={() => setShowHistoryDrawer(false)}
+        />
+
+        {/* File Attachments Drawer */}
+        <AttachmentDrawer
+          artifactId={documentId}
+          artifactType="DOCUMENT"
+          canEdit={canEdit}
+          isOpen={showAttachmentsDrawer}
+          onClose={() => setShowAttachmentsDrawer(false)}
+          onCountChange={setAttachmentCount}
+          isDemoMode={isDemoMode}
         />
       </div>
     </div>

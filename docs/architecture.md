@@ -227,3 +227,21 @@ Transactions are strictly required for multi-table atomic operations:
   }
   ```
 - **Client Handling**: Unhandled exceptions are caught by Next.js `error.tsx` boundary with retry controls; form validation errors are rendered inline via `react-hook-form` + `zod`.
+
+---
+
+## 6. Private File Attachment Architecture (Phase 9B)
+
+SyncSpace implements a vendor-agnostic, server-side `StorageProvider` abstraction (`src/lib/storage.ts`) paired with `AttachmentService` (`src/services/attachment.service.ts`) so application code never depends directly on one object storage vendor or exposes public bucket URLs.
+
+### 6.1 Storage Providers & Fail-Closed Resolution
+- **`S3StorageProvider` (`STORAGE_PROVIDER=s3`)**: Uses AWS SDK v3 (`@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`) against a private bucket with public object access disabled. Supports short-lived presigned upload/download flows and server-side byte verification.
+- **`LocalFileStorageProvider` (`STORAGE_PROVIDER=local`)**: Stores binary blobs in `.storage/attachments` strictly outside the `public/` web root for zero-credential local development. Writes atomically via temporary files and validates path containment.
+- **`InMemoryStorageProvider` (`STORAGE_PROVIDER=memory`)**: Isolated in-memory adapter with fault-injection hooks for automated unit and integration tests.
+- **Fail-Closed Production Enforcement**: When `NODE_ENV=production`, `resolveStorageProviderFromEnv` requires a valid `s3` configuration and rejects `local`, `memory`, or placeholder S3 credentials (`StorageConfigurationError`), preventing silent fallback to ephemeral disk storage.
+
+### 6.2 Attachment Lifecycle & Two-Phase Deletion
+1. **Initiation (`PENDING`)**: `AttachmentService.initiateUpload` revalidates `EDIT` access inside a database transaction (`requireArtifactAccessTx`), enforces pending concurrency limits, sanitizes the display filename, generates an unpredictable storage key (`workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{uuid}-{hex}`), and inserts a `PENDING` record.
+2. **Verification & Completion (`READY` / `FAILED`)**: Before transitioning to `READY`, `completeUpload` verifies that the stored object exists, matches the declared byte size ($\le 10\text{ MiB}$), passes magic-byte signature inspection (`%PDF-`, PNG, JPEG, WebP, or UTF-8 text/CSV free of active HTML/SVG/scripts/executables), and records its `sha256` digest. Invalid objects are deleted from storage and marked `FAILED`.
+3. **Authorized Download & Preview**: Every `GET /api/artifacts/[artifactId]/attachments/[attachmentId]/download` request re-evaluates current workspace membership, artifact archival state, and explicit `NONE` overrides before streaming verified `READY` bytes with `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, and strict `Content-Security-Policy` headers.
+4. **Two-Phase Idempotent Deletion (`DELETING`)**: Deletion transitions the record to `DELETING` first (immediately blocking downloads), deletes the object from private storage, and then deletes the database record. If storage deletion fails, the record stays in `DELETING` (inaccessible) and can be retried idempotently.
