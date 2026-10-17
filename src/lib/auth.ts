@@ -5,6 +5,33 @@ import { resolveAuthSecret } from "@/lib/auth-secret";
 
 export { resolveAuthSecret };
 
+function resolveTrustedOrigins(): string[] {
+  const origins: string[] = [];
+  const envOrigins = process.env.BETTER_AUTH_TRUSTED_ORIGINS;
+  if (envOrigins) {
+    origins.push(
+      ...envOrigins
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean)
+    );
+  }
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+  if (appUrl && !origins.includes(appUrl)) {
+    origins.push(appUrl);
+  }
+  const authUrl = process.env.BETTER_AUTH_URL?.trim();
+  if (authUrl && !origins.includes(authUrl)) {
+    origins.push(authUrl);
+  }
+  if (process.env.NODE_ENV !== "production") {
+    if (!origins.includes("http://localhost:3000")) {
+      origins.push("http://localhost:3000");
+    }
+  }
+  return origins;
+}
+
 export const auth = betterAuth({
   database: prismaAdapter(prisma, {
     provider: "postgresql",
@@ -14,6 +41,13 @@ export const auth = betterAuth({
     process.env.BETTER_AUTH_URL ||
     process.env.NEXT_PUBLIC_APP_URL ||
     "http://localhost:3000",
+  trustedOrigins: resolveTrustedOrigins(),
+  advanced: {
+    useSecureCookies:
+      process.env.NODE_ENV === "production" &&
+      !process.env.BETTER_AUTH_URL?.startsWith("http://localhost:") &&
+      !process.env.NEXT_PUBLIC_APP_URL?.startsWith("http://localhost:"),
+  },
   emailAndPassword: {
     enabled: true,
     autoSignIn: true,

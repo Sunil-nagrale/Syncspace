@@ -232,6 +232,65 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* Production Architecture Section */}
+      <section id="architecture" className="py-20 bg-muted/20 border-b">
+        <div className="container mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="text-center max-w-3xl mx-auto mb-16">
+            <Badge variant="outline" className="mb-3 px-3 py-1 text-xs border-primary/20 bg-primary/5 text-primary">
+              Fullstack Architecture
+            </Badge>
+            <h2 className="text-3xl font-bold tracking-tight">
+              Production-Grade Infrastructure & Collaboration Pipeline
+            </h2>
+            <p className="mt-3 text-muted-foreground">
+              A robust, decoupled architecture separating durable relational state, low-latency CRDT synchronization, and secure private object storage.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="rounded-xl border bg-card p-6 space-y-3">
+              <div className="h-10 w-10 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-bold text-sm">
+                01
+              </div>
+              <h3 className="text-base font-semibold">Next.js 15 Monolith</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                App Router architecture with React 19, server actions, route handlers, and static build isolation for production secrets.
+              </p>
+            </div>
+
+            <div className="rounded-xl border bg-card p-6 space-y-3">
+              <div className="h-10 w-10 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center font-bold text-sm">
+                02
+              </div>
+              <h3 className="text-base font-semibold">PostgreSQL & Prisma</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Relational source of truth enforcing workspace tenancy, user RBAC, cursor pagination, and immutable audit activity events.
+              </p>
+            </div>
+
+            <div className="rounded-xl border bg-card p-6 space-y-3">
+              <div className="h-10 w-10 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center font-bold text-sm">
+                03
+              </div>
+              <h3 className="text-base font-semibold">Liveblocks CRDT Relay</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Low-latency WebSocket sync layer. Authenticates room access server-side, reconciles concurrent edits, and broadcasts presence cursors.
+              </p>
+            </div>
+
+            <div className="rounded-xl border bg-card p-6 space-y-3">
+              <div className="h-10 w-10 rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400 flex items-center justify-center font-bold text-sm">
+                04
+              </div>
+              <h3 className="text-base font-semibold">Private S3 Object Store</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Staged-to-final promotion architecture preventing post-verification overwrites, with SHA-256 integrity verification on download.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Core Capabilities Grid */}
       <section id="features" className="py-20 border-b">
         <div className="container mx-auto max-w-7xl px-4 sm:px-6">

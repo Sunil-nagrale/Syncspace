@@ -16,8 +16,8 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const redirectTarget = getSafeRedirectUrl(searchParams.get("redirect"), "/app");
 
-  const [email, setEmail] = useState("lead.architect@syncspace.dev");
-  const [password, setPassword] = useState("Password123!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -111,6 +111,19 @@ function LoginForm() {
               </>
             )}
           </Button>
+
+          <div className="pt-2 text-center">
+            <button
+              type="button"
+              onClick={() => {
+                setEmail("lead.architect@syncspace.dev");
+                setPassword("Password123!");
+              }}
+              className="text-[11px] text-muted-foreground hover:text-foreground hover:underline transition"
+            >
+              Demo credentials: lead.architect@syncspace.dev
+            </button>
+          </div>
         </form>
 
         <div className="relative py-2 text-center text-xs after:absolute after:inset-0 after:top-1/2 after:z-0 after:flex after:items-center after:border-t after:border-border">
