@@ -6,6 +6,7 @@ import {
   CopyObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
+  PutObjectCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
 import {
@@ -334,7 +335,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     });
 
-    it("stores, promotes from staging to final key, removes staging object, and resists staging overwrite in LocalFileStorageProvider", async () => {
+    it("stores, promotes exact validated bytes to final key even if staging is overwritten before promotion, and removes staging object in LocalFileStorageProvider", async () => {
       const localProvider = new LocalFileStorageProvider(tempDir);
       const stagingKey = generateStagingStorageKey("ws_local", "art_local");
       const finalKey = generateFinalStorageKey("ws_local", "art_local");
@@ -349,15 +350,29 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       expect(stagedHead.exists).toBe(true);
       expect(stagedHead.byteLength).toBe(VALID_PDF_BYTES.byteLength);
 
-      // Promote from stagingKey -> finalKey
+      const validatedSnapshot = await localProvider.getObjectBytes(stagingKey);
+      expect(validatedSnapshot).not.toBeNull();
+
+      // Simulate a TOCTOU overwrite of the staging key after reading/validating bytes but before promoteObject runs
+      const tamperedStagingBytes = new TextEncoder().encode(
+        "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Tampered true >>\nendobj\n%%EOF"
+      );
+      await localProvider.putObject({
+        storageKey: stagingKey,
+        bytes: tamperedStagingBytes,
+        contentType: "application/pdf",
+      });
+
+      // Promote exact validated bytes from stagingKey -> finalKey
       const promoted = await localProvider.promoteObject({
         sourceKey: stagingKey,
         destinationKey: finalKey,
+        bytes: validatedSnapshot!,
         contentType: "application/pdf",
       });
       expect(promoted.byteLength).toBe(VALID_PDF_BYTES.byteLength);
 
-      // Staging object must be removed and final object must exist
+      // Staging object must be removed and final object must contain the exact validated bytes (not tamperedStagingBytes)
       expect((await localProvider.headObject(stagingKey)).exists).toBe(false);
       const finalHead = await localProvider.headObject(finalKey);
       expect(finalHead.exists).toBe(true);
@@ -373,6 +388,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       const finalBytes = await localProvider.getObjectBytes(finalKey);
       expect(finalBytes).not.toBeNull();
       expect(Buffer.from(finalBytes!)).toEqual(Buffer.from(VALID_PDF_BYTES));
+      expect(computeSha256Hex(finalBytes!)).toBe(computeSha256Hex(VALID_PDF_BYTES));
 
       await localProvider.deleteObject(finalKey);
       expect((await localProvider.headObject(finalKey)).exists).toBe(false);
@@ -384,7 +400,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       ).toThrow(StorageConfigurationError);
     });
 
-    it("supports staging promotion, fault injection, and retry recovery in InMemoryStorageProvider", async () => {
+    it("supports exact-byte staging promotion, fault injection, and retry recovery in InMemoryStorageProvider", async () => {
       const mem = new InMemoryStorageProvider();
       const stagingKey = generateStagingStorageKey("ws_mem", "art_mem");
       const finalKey = generateFinalStorageKey("ws_mem", "art_mem");
@@ -413,6 +429,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
         mem.promoteObject({
           sourceKey: stagingKey,
           destinationKey: finalKey,
+          bytes: VALID_PNG_BYTES,
           contentType: "image/png",
         })
       ).rejects.toThrow(StorageError);
@@ -424,6 +441,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
         mem.promoteObject({
           sourceKey: stagingKey,
           destinationKey: finalKey,
+          bytes: VALID_PNG_BYTES,
           contentType: "image/png",
         })
       ).resolves.toEqual({ byteLength: VALID_PNG_BYTES.byteLength });
@@ -439,7 +457,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       expect(mem.hasKey(finalKey)).toBe(false);
     });
 
-    it("enforces staging-only presigned upload URLs and atomic server-side copy+delete promotion in S3StorageProvider (mocked S3Client)", async () => {
+    it("enforces staging-only presigned upload URLs and writes exact validated bytes via PutObjectCommand+DeleteObjectCommand in S3StorageProvider (mocked S3Client)", async () => {
       const sentCommands: unknown[] = [];
       let failStagingDelete = false;
 
@@ -453,7 +471,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
               ContentType: "application/pdf",
             };
           }
-          if (command instanceof CopyObjectCommand) {
+          if (command instanceof PutObjectCommand) {
             return {};
           }
           if (command instanceof DeleteObjectCommand) {
@@ -485,10 +503,11 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
         })
       ).rejects.toThrow(StorageError);
 
-      // Promotion copies stagingKey -> finalKey and deletes stagingKey
+      // Promotion writes exact validated bytes to finalKey via PutObjectCommand (never CopyObjectCommand) and deletes stagingKey
       const promoResult = await s3Provider.promoteObject({
         sourceKey: stagingKey,
         destinationKey: finalKey,
+        bytes: VALID_PDF_BYTES,
         contentType: "application/pdf",
       });
       expect(promoResult.byteLength).toBe(VALID_PDF_BYTES.byteLength);
@@ -496,13 +515,19 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       const copyCmd = sentCommands.find(
         (c): c is CopyObjectCommand => c instanceof CopyObjectCommand
       );
-      expect(copyCmd).toBeDefined();
-      expect(copyCmd!.input.Bucket).toBe("syncspace-test-private-bucket");
-      expect(copyCmd!.input.CopySource).toBe(
-        `syncspace-test-private-bucket/${stagingKey}`
+      expect(copyCmd).toBeUndefined();
+
+      const putCmd = sentCommands.find(
+        (c): c is PutObjectCommand => c instanceof PutObjectCommand
       );
-      expect(copyCmd!.input.Key).toBe(finalKey);
-      expect(copyCmd!.input.MetadataDirective).toBe("REPLACE");
+      expect(putCmd).toBeDefined();
+      expect(putCmd!.input.Bucket).toBe("syncspace-test-private-bucket");
+      expect(putCmd!.input.Key).toBe(finalKey);
+      expect(putCmd!.input.ContentType).toBe("application/pdf");
+      expect(putCmd!.input.ContentLength).toBe(VALID_PDF_BYTES.byteLength);
+      expect(Buffer.from(putCmd!.input.Body as Uint8Array)).toEqual(
+        Buffer.from(VALID_PDF_BYTES)
+      );
 
       const deleteCmd = sentCommands.find(
         (c): c is DeleteObjectCommand => c instanceof DeleteObjectCommand
@@ -510,13 +535,14 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       expect(deleteCmd).toBeDefined();
       expect(deleteCmd!.input.Key).toBe(stagingKey);
 
-      // If deleting the staging object fails during S3 promotion, S3StorageProvider rolls back the destination copy
+      // If deleting the staging object fails during S3 promotion, S3StorageProvider rolls back the destination object
       sentCommands.length = 0;
       failStagingDelete = true;
       await expect(
         s3Provider.promoteObject({
           sourceKey: stagingKey,
           destinationKey: finalKey,
+          bytes: VALID_PDF_BYTES,
           contentType: "application/pdf",
         })
       ).rejects.toThrow(StorageError);

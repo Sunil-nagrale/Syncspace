@@ -6,7 +6,6 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   DeleteObjectCommand,
-  CopyObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -58,10 +57,16 @@ export interface StorageProvider {
     maxBytes?: number
   ): Promise<Uint8Array | null>;
 
+  /**
+   * Promotes an upload by writing the exact server-validated byte buffer to a distinct
+   * final storage key ('workspaces/.../blobs/...') and removing the staging object.
+   * Never copies from the mutable staging key, closing any TOCTOU window.
+   */
   promoteObject(params: {
     sourceKey: string;
     destinationKey: string;
-    contentType?: string;
+    bytes: Uint8Array;
+    contentType: string;
   }): Promise<{ byteLength: number }>;
 
   createPresignedUploadUrl?(params: {
@@ -175,6 +180,19 @@ export function assertValidPromotionKeys(
       400
     );
   }
+}
+
+function assertValidPromotionBytes(bytes: Uint8Array | undefined): Uint8Array {
+  if (!bytes || !ArrayBuffer.isView(bytes) || bytes.byteLength === 0) {
+    throw new StorageError(
+      "Promotion requires a non-empty validated byte buffer.",
+      400
+    );
+  }
+  const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const copy = new Uint8Array(view.byteLength);
+  copy.set(view);
+  return copy;
 }
 
 function isPlaceholderValue(value: string | undefined): boolean {
@@ -332,29 +350,23 @@ export class S3StorageProvider implements StorageProvider {
   async promoteObject(params: {
     sourceKey: string;
     destinationKey: string;
-    contentType?: string;
+    bytes: Uint8Array;
+    contentType: string;
   }): Promise<{ byteLength: number }> {
     assertValidPromotionKeys(params.sourceKey, params.destinationKey);
+    const exactBytes = assertValidPromotionBytes(params.bytes);
+    const effectiveContentType =
+      params.contentType || "application/octet-stream";
 
-    const head = await this.headObject(params.sourceKey);
-    if (!head.exists) {
-      throw new StorageError(
-        "Staged object was not found in storage for promotion.",
-        404
-      );
-    }
-
+    // Write the exact validated byte buffer directly to the final 'blobs/' key via server-side PutObjectCommand
     try {
       await this.client.send(
-        new CopyObjectCommand({
+        new PutObjectCommand({
           Bucket: this.bucketName,
-          CopySource: encodeURI(`${this.bucketName}/${params.sourceKey}`),
           Key: params.destinationKey,
-          ContentType:
-            params.contentType ||
-            head.contentType ||
-            "application/octet-stream",
-          MetadataDirective: "REPLACE",
+          Body: exactBytes,
+          ContentType: effectiveContentType,
+          ContentLength: exactBytes.byteLength,
         })
       );
     } catch {
@@ -364,6 +376,7 @@ export class S3StorageProvider implements StorageProvider {
       );
     }
 
+    // Remove the staging object after writing the final object
     try {
       await this.client.send(
         new DeleteObjectCommand({
@@ -372,7 +385,7 @@ export class S3StorageProvider implements StorageProvider {
         })
       );
     } catch {
-      // Roll back the destination copy if staging cleanup fails so promotion remains atomic
+      // Roll back the final object if staging cleanup fails so promotion remains atomic
       await this.client
         .send(
           new DeleteObjectCommand({
@@ -387,7 +400,7 @@ export class S3StorageProvider implements StorageProvider {
       );
     }
 
-    return { byteLength: head.byteLength };
+    return { byteLength: exactBytes.byteLength };
   }
 
   async createPresignedUploadUrl(params: {
@@ -602,35 +615,27 @@ export class LocalFileStorageProvider implements StorageProvider {
   async promoteObject(params: {
     sourceKey: string;
     destinationKey: string;
-    contentType?: string;
+    bytes: Uint8Array;
+    contentType: string;
   }): Promise<{ byteLength: number }> {
     assertValidPromotionKeys(params.sourceKey, params.destinationKey);
+    const exactBytes = assertValidPromotionBytes(params.bytes);
+    const effectiveContentType =
+      params.contentType || "application/octet-stream";
 
-    const head = await this.headObject(params.sourceKey);
-    if (!head.exists) {
-      throw new StorageError(
-        "Staged object was not found in local storage for promotion.",
-        404
-      );
-    }
-
-    const srcPaths = this.resolveObjectPaths(params.sourceKey);
     const destPaths = this.resolveObjectPaths(params.destinationKey);
     const destDir = path.dirname(destPaths.blobPath);
     const tmpDestPath = `${destPaths.blobPath}.${process.pid}.${Date.now()}.tmp`;
 
     try {
       await fs.mkdir(destDir, { recursive: true });
-      await fs.copyFile(srcPaths.blobPath, tmpDestPath);
+      await fs.writeFile(tmpDestPath, exactBytes);
       await fs.rename(tmpDestPath, destPaths.blobPath);
       await fs.writeFile(
         destPaths.metaPath,
         JSON.stringify({
-          contentType:
-            params.contentType ||
-            head.contentType ||
-            "application/octet-stream",
-          byteLength: head.byteLength,
+          contentType: effectiveContentType,
+          byteLength: exactBytes.byteLength,
           promotedAt: new Date().toISOString(),
         }),
         "utf-8"
@@ -640,7 +645,7 @@ export class LocalFileStorageProvider implements StorageProvider {
       await fs.unlink(destPaths.blobPath).catch(() => {});
       await fs.unlink(destPaths.metaPath).catch(() => {});
       throw new StorageError(
-        "Failed to promote staged object to final local storage location.",
+        "Failed to promote validated bytes to final local storage location.",
         500
       );
     }
@@ -653,7 +658,7 @@ export class LocalFileStorageProvider implements StorageProvider {
       throw err;
     }
 
-    return { byteLength: head.byteLength };
+    return { byteLength: exactBytes.byteLength };
   }
 
   async deleteObject(storageKey: string): Promise<void> {
@@ -675,7 +680,7 @@ export class LocalFileStorageProvider implements StorageProvider {
 
 /**
  * Isolated in-memory storage adapter for unit and integration tests.
- * Supports fault-injection hooks to test error handling, rollback, and retry behavior.
+ * Supports fault-injection hooks to test error handling, rollback, TOCTOU races, and retry behavior.
  */
 export class InMemoryStorageProvider implements StorageProvider {
   public readonly providerName = "memory" as const;
@@ -689,6 +694,12 @@ export class InMemoryStorageProvider implements StorageProvider {
   private failNextGet = false;
   private failNextHead = false;
   private failNextPromote = false;
+  private beforePromoteHook:
+    | ((params: {
+        sourceKey: string;
+        destinationKey: string;
+      }) => Promise<void> | void)
+    | null = null;
 
   public setFailNextPut(fail = true): void {
     this.failNextPut = fail;
@@ -710,6 +721,22 @@ export class InMemoryStorageProvider implements StorageProvider {
     this.failNextPromote = fail;
   }
 
+  /**
+   * Test-only hook invoked inside promoteObject before the final key is written.
+   * Used to deterministically simulate a concurrent client overwriting the staging key
+   * after completeUpload() has already read and validated the original staged bytes.
+   */
+  public setBeforePromoteHookForTests(
+    hook:
+      | ((params: {
+          sourceKey: string;
+          destinationKey: string;
+        }) => Promise<void> | void)
+      | null
+  ): void {
+    this.beforePromoteHook = hook;
+  }
+
   public clear(): void {
     this.store.clear();
     this.failNextPut = false;
@@ -717,6 +744,7 @@ export class InMemoryStorageProvider implements StorageProvider {
     this.failNextGet = false;
     this.failNextHead = false;
     this.failNextPromote = false;
+    this.beforePromoteHook = null;
   }
 
   public hasKey(storageKey: string): boolean {
@@ -806,19 +834,24 @@ export class InMemoryStorageProvider implements StorageProvider {
   async promoteObject(params: {
     sourceKey: string;
     destinationKey: string;
-    contentType?: string;
+    bytes: Uint8Array;
+    contentType: string;
   }): Promise<{ byteLength: number }> {
     assertValidPromotionKeys(params.sourceKey, params.destinationKey);
+    const exactBytes = assertValidPromotionBytes(params.bytes);
+
+    if (this.beforePromoteHook) {
+      const hook = this.beforePromoteHook;
+      this.beforePromoteHook = null;
+      await hook({
+        sourceKey: params.sourceKey,
+        destinationKey: params.destinationKey,
+      });
+    }
+
     if (this.failNextPromote) {
       this.failNextPromote = false;
       throw new StorageError("Simulated storage promotion failure.", 502);
-    }
-    const entry = this.store.get(params.sourceKey);
-    if (!entry) {
-      throw new StorageError(
-        "Staged object was not found in memory storage for promotion.",
-        404
-      );
     }
     if (this.failNextDelete) {
       this.failNextDelete = false;
@@ -827,14 +860,14 @@ export class InMemoryStorageProvider implements StorageProvider {
         502
       );
     }
-    const copy = new Uint8Array(entry.bytes.byteLength);
-    copy.set(entry.bytes);
+
+    // Write the exact validated byte buffer to destinationKey, ignoring any concurrent mutation of sourceKey
     this.store.set(params.destinationKey, {
-      bytes: copy,
-      contentType: params.contentType || entry.contentType,
+      bytes: exactBytes,
+      contentType: params.contentType || "application/octet-stream",
     });
     this.store.delete(params.sourceKey);
-    return { byteLength: copy.byteLength };
+    return { byteLength: exactBytes.byteLength };
   }
 
   async deleteObject(storageKey: string): Promise<void> {

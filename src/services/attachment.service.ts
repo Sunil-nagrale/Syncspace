@@ -532,8 +532,12 @@ export class AttachmentService {
       );
     }
 
+    // Freeze an isolated copy of the exact bytes that will undergo validation and promotion
+    const validatedBytes = new Uint8Array(storedBytes.byteLength);
+    validatedBytes.set(storedBytes);
+
     const validation = validateFileSignatureAndContent({
-      bytes: storedBytes,
+      bytes: validatedBytes,
       declaredMimeType: existing.fileType,
       fileName: existing.fileName,
     });
@@ -550,7 +554,7 @@ export class AttachmentService {
       );
     }
 
-    // Re-check authorization prior to promoting staged object to final key
+    // Re-check authorization prior to promoting validated bytes to final key
     await AuthorizationService.requireArtifactAccess(
       userId,
       artifactId,
@@ -562,10 +566,11 @@ export class AttachmentService {
       artifact.id
     );
 
-    // Promote validated staged object to distinct final storage key and remove staging object
+    // Promote the exact validated byte buffer to the distinct final storage key and remove the staging object
     await storage.promoteObject({
       sourceKey: stagingKey,
       destinationKey: finalStorageKey,
+      bytes: validatedBytes,
       contentType: existing.fileType,
     });
 
@@ -716,7 +721,7 @@ export class AttachmentService {
         stagingKey,
         finalKey: finalStorageKey,
         contentType: existing.fileType,
-        validatedBytes: storedBytes,
+        validatedBytes,
         error: dbErr,
       });
       throw dbErr;

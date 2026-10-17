@@ -51,10 +51,12 @@ describe("Artifact File Attachments PostgreSQL Integration Tests", () => {
     memoryStorage.setFailNextGet(false);
     memoryStorage.setFailNextHead(false);
     memoryStorage.setFailNextPromote(false);
+    memoryStorage.setBeforePromoteHookForTests(null);
     AttachmentService.setFailNextCompleteTransactionForTests(false);
   });
 
   afterAll(async () => {
+    memoryStorage.setBeforePromoteHookForTests(null);
     setStorageProviderForTests(null);
     memoryStorage.clear();
 
@@ -951,5 +953,94 @@ describe("Artifact File Attachments PostgreSQL Integration Tests", () => {
       },
     });
     expect(integrityEvent).not.toBeNull();
+  });
+
+  it("12. Closes the staging-to-final TOCTOU race when staging object is overwritten after validation but before promotion completes", async () => {
+    const { editor1, viewer, doc } = await createTestWorkspaceFixture();
+
+    const initiated = await AttachmentService.initiateUpload(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "toctou-protected-contract.pdf",
+        fileType: "application/pdf",
+        fileSize: SAMPLE_PDF_BYTES.byteLength,
+      }
+    );
+
+    const pendingRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initiated.attachment.id },
+    });
+    const stagingKey = pendingRow.storageKey;
+
+    // 1. Client uploads original valid PDF bytes to the staging key
+    await memoryStorage.putObject({
+      storageKey: stagingKey,
+      bytes: SAMPLE_PDF_BYTES,
+      contentType: "application/pdf",
+    });
+
+    // Prepare a second payload of the exact same length (or different bytes) to simulate a TOCTOU overwrite
+    // via a still-valid presigned PUT URL after completeUpload() reads and validates the staging object
+    // but before promoteObject() writes the final destination object.
+    const toctouReplacementBytes = new TextEncoder().encode(
+      "%PDF-1.7\n1 0 obj\n<< /Type /Tamperd >>\nendobj\n%%EOF\n"
+    );
+    expect(toctouReplacementBytes.byteLength).toBe(SAMPLE_PDF_BYTES.byteLength);
+    expect(computeSha256Hex(toctouReplacementBytes)).not.toBe(
+      computeSha256Hex(SAMPLE_PDF_BYTES)
+    );
+
+    let toctouOverwriteExecuted = false;
+    memoryStorage.setBeforePromoteHookForTests(async ({ sourceKey, destinationKey }) => {
+      expect(sourceKey).toBe(stagingKey);
+      expect(memoryStorage.hasKey(destinationKey)).toBe(false);
+
+      // Overwrite the staging object right after validation passed and before destinationKey is written
+      await memoryStorage.putObject({
+        storageKey: sourceKey,
+        bytes: toctouReplacementBytes,
+        contentType: "application/pdf",
+      });
+      toctouOverwriteExecuted = true;
+    });
+
+    // 2. Complete the upload while the TOCTOU hook overwrites the staging object mid-finalization
+    const finalized = await AttachmentService.completeUpload(
+      editor1.id,
+      doc.id,
+      initiated.attachment.id
+    );
+
+    expect(toctouOverwriteExecuted).toBe(true);
+    expect(finalized.status).toBe("READY");
+    expect(finalized.sha256).toBe(computeSha256Hex(SAMPLE_PDF_BYTES));
+
+    // 3. Verify database metadata and underlying storage object at final key
+    const readyRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initiated.attachment.id },
+    });
+    expect(readyRow.status).toBe("READY");
+    expect(readyRow.storageKey).not.toBe(stagingKey);
+    expect(readyRow.sha256).toBe(computeSha256Hex(SAMPLE_PDF_BYTES));
+    expect(memoryStorage.hasKey(stagingKey)).toBe(false);
+
+    const finalizedObjectBytes = await memoryStorage.getObjectBytes(
+      readyRow.storageKey
+    );
+    expect(finalizedObjectBytes).not.toBeNull();
+    expect(Buffer.from(finalizedObjectBytes!)).toEqual(
+      Buffer.from(SAMPLE_PDF_BYTES)
+    );
+    expect(computeSha256Hex(finalizedObjectBytes!)).toBe(readyRow.sha256);
+
+    // 4. Authorized download returns the exact validated bytes without integrity failure
+    const downloaded = await AttachmentService.getDownloadPayload(
+      viewer.id,
+      doc.id,
+      initiated.attachment.id
+    );
+    expect(Buffer.from(downloaded.bytes)).toEqual(Buffer.from(SAMPLE_PDF_BYTES));
+    expect(computeSha256Hex(downloaded.bytes)).toBe(readyRow.sha256);
   });
 });
