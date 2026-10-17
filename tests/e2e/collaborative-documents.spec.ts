@@ -148,6 +148,7 @@ test.describe("SyncSpace Phase 5 — Collaborative Rich-Text Document Editor & R
     // 5. Rich-Text Editing: headings, formatting, slash command menu, safe link validation, and table
     const editorCanvas = ownerPage.getByTestId("tiptap-editor-canvas");
     await expect(editorCanvas).toBeVisible();
+    await expect(editorCanvas).toContainText("Overview & Objectives");
     await editorCanvas.click();
 
     // Insert a Heading 1 via Toolbar and type heading text

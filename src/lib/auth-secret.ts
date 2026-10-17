@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 export const INSECURE_DEFAULT_SECRET =
   "syncspace_super_secret_development_encryption_key_2026";
 export const MINIMUM_SECRET_LENGTH = 32;
@@ -7,6 +9,27 @@ export class AuthConfigurationError extends Error {
     super(message);
     this.name = "AuthConfigurationError";
   }
+}
+
+/**
+ * Ephemeral secret generated in-memory per Node process for Next.js build-phase bundling.
+ * It is cryptographically random, never hardcoded, never predictable across builds,
+ * and cannot be used for persistent authentication at runtime.
+ */
+let memoizedEphemeralBuildSecret: string | null = null;
+
+export function getEphemeralBuildSecret(): string {
+  if (!memoizedEphemeralBuildSecret) {
+    memoizedEphemeralBuildSecret = `ephemeral_build_${randomBytes(32).toString("hex")}`;
+  }
+  return memoizedEphemeralBuildSecret;
+}
+
+/**
+ * Resets the memoized ephemeral build-phase secret (for testing).
+ */
+export function _resetEphemeralBuildSecretForTesting(): void {
+  memoizedEphemeralBuildSecret = null;
 }
 
 /**
@@ -37,9 +60,9 @@ export function isPlaceholderSecret(value: string | undefined): boolean {
  *    - Violation throws an AuthConfigurationError and aborts execution.
  * 2. In production build phase (NEXT_PHASE === "phase-production-build"):
  *    - If a valid secret is provided, it is returned.
- *    - If missing or placeholder during build phase, an ephemeral throwaway secret is returned
- *      so that Next.js static page data collection and module bundling succeed in CI/Docker without
- *      requiring production secrets at build time.
+ *    - If missing or placeholder during build phase, a cryptographically random ephemeral key
+ *      is generated in-memory so Next.js static page collection and bundling succeed without
+ *      requiring production secrets at build time or leaking predictable tokens.
  * 3. In non-production (development, test):
  *    - If BETTER_AUTH_SECRET is provided, it is used.
  *    - If absent, a development-only fallback key is used so local setup and vitest run smoothly.
@@ -60,7 +83,7 @@ export function resolveAuthSecret(
       ) {
         return secret;
       }
-      return "ephemeral_build_phase_secret_minimum_32_characters_not_for_runtime";
+      return getEphemeralBuildSecret();
     }
 
     if (!secret) {

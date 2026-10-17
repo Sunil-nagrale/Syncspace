@@ -1,15 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   resolveAuthSecret,
   isPlaceholderSecret,
   AuthConfigurationError,
   INSECURE_DEFAULT_SECRET,
   MINIMUM_SECRET_LENGTH,
+  _resetEphemeralBuildSecretForTesting,
 } from "@/lib/auth-secret";
 
 describe("Phase H.1 — Authentication Secret Production Hardening Tests", () => {
   const validProductionSecret =
     "c8f7d9a0e1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8";
+
+  beforeEach(() => {
+    _resetEphemeralBuildSecretForTesting();
+  });
 
   describe("1. Production Runtime Enforcement (NODE_ENV === 'production')", () => {
     it("fails fast when BETTER_AUTH_SECRET is undefined or empty", () => {
@@ -81,15 +86,33 @@ describe("Phase H.1 — Authentication Secret Production Hardening Tests", () =>
   });
 
   describe("2. Build Phase Behavior (NEXT_PHASE === 'phase-production-build')", () => {
-    it("provides an ephemeral build-phase secret when building without production secrets", () => {
-      const buildSecret = resolveAuthSecret({
+    it("provides a genuinely random ephemeral build-phase secret when building without production secrets", () => {
+      const buildSecret1 = resolveAuthSecret({
         NODE_ENV: "production",
         NEXT_PHASE: "phase-production-build",
       });
 
-      expect(buildSecret).toBeDefined();
-      expect(buildSecret.length).toBeGreaterThanOrEqual(MINIMUM_SECRET_LENGTH);
-      expect(buildSecret).toContain("ephemeral_build_phase_secret");
+      expect(buildSecret1).toBeDefined();
+      expect(buildSecret1.length).toBeGreaterThanOrEqual(MINIMUM_SECRET_LENGTH);
+      expect(buildSecret1.startsWith("ephemeral_build_")).toBe(true);
+      expect(buildSecret1).not.toBe("ephemeral_build_phase_secret_minimum_32_characters_not_for_runtime");
+      expect(buildSecret1).not.toBe(INSECURE_DEFAULT_SECRET);
+
+      // Memoized within the same process build run
+      const buildSecret2 = resolveAuthSecret({
+        NODE_ENV: "production",
+        NEXT_PHASE: "phase-production-build",
+      });
+      expect(buildSecret2).toBe(buildSecret1);
+
+      // Produces a fresh distinct unguessable secret across different build runs
+      _resetEphemeralBuildSecretForTesting();
+      const buildSecret3 = resolveAuthSecret({
+        NODE_ENV: "production",
+        NEXT_PHASE: "phase-production-build",
+      });
+      expect(buildSecret3).not.toBe(buildSecret1);
+      expect(buildSecret3.startsWith("ephemeral_build_")).toBe(true);
     });
 
     it("preserves valid secret if provided during build phase", () => {
