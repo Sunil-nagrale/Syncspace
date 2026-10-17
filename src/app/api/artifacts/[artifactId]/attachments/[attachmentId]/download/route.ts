@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "@/lib/session";
 import {
+  AttachmentIntegrityError,
   AttachmentService,
   AttachmentValidationError,
 } from "@/services/attachment.service";
@@ -59,6 +60,15 @@ export async function GET(
       return NextResponse.json(
         { error: err.message },
         { status: err.statusCode }
+      );
+    }
+    if (err instanceof AttachmentIntegrityError) {
+      return NextResponse.json(
+        {
+          error:
+            "Attachment integrity verification failed. The file cannot be downloaded.",
+        },
+        { status: err.statusCode || 500 }
       );
     }
     if (err instanceof AttachmentValidationError) {

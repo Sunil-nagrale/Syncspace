@@ -3,10 +3,18 @@ import path from "path";
 import os from "os";
 import { promises as fs } from "fs";
 import {
+  CopyObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  type S3Client,
+} from "@aws-sdk/client-s3";
+import {
   MAX_ATTACHMENT_SIZE_BYTES,
   buildContentDispositionHeader,
   computeSha256Hex,
   generateAttachmentStorageKey,
+  generateFinalStorageKey,
+  generateStagingStorageKey,
   hasForbiddenExtension,
   initiateAttachmentUploadSchema,
   isAllowedMimeType,
@@ -19,7 +27,12 @@ import {
   S3StorageProvider,
   StorageConfigurationError,
   StorageError,
+  assertFinalStorageKey,
   assertSafeStorageKey,
+  assertStagingStorageKey,
+  assertValidPromotionKeys,
+  isFinalStorageKey,
+  isStagingStorageKey,
   resolveStorageProviderFromEnv,
 } from "@/lib/storage";
 
@@ -252,15 +265,46 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       expect(csvRequestedInline.startsWith("attachment;")).toBe(true);
     });
 
-    it("generates unpredictable storage keys completely independent of user filenames", () => {
-      const key1 = generateAttachmentStorageKey("ws_123", "art_456");
-      const key2 = generateAttachmentStorageKey("ws_123", "art_456");
+    it("generates distinct staging and final storage keys and validates promotion scopes", () => {
+      const stagingKey = generateStagingStorageKey("ws_123", "art_456");
+      const finalKey = generateFinalStorageKey("ws_123", "art_456");
+      const otherWorkspaceFinalKey = generateFinalStorageKey("ws_999", "art_456");
+      const otherArtifactFinalKey = generateFinalStorageKey("ws_123", "art_999");
 
-      expect(key1).not.toBe(key2);
-      expect(key1).toMatch(
+      expect(stagingKey).not.toBe(finalKey);
+      expect(stagingKey).toMatch(
+        /^workspaces\/ws_123\/artifacts\/art_456\/staging\/[a-f0-9-]+$/
+      );
+      expect(finalKey).toMatch(
         /^workspaces\/ws_123\/artifacts\/art_456\/blobs\/[a-f0-9-]+$/
       );
-      expect(() => assertSafeStorageKey(key1)).not.toThrow();
+
+      expect(isStagingStorageKey(stagingKey)).toBe(true);
+      expect(isFinalStorageKey(stagingKey)).toBe(false);
+      expect(isFinalStorageKey(finalKey)).toBe(true);
+      expect(isStagingStorageKey(finalKey)).toBe(false);
+
+      expect(() => assertStagingStorageKey(stagingKey)).not.toThrow();
+      expect(() => assertStagingStorageKey(finalKey)).toThrow(StorageError);
+      expect(() => assertFinalStorageKey(finalKey)).not.toThrow();
+      expect(() => assertFinalStorageKey(stagingKey)).toThrow(StorageError);
+
+      // Valid promotion pair within same workspace and artifact
+      expect(() => assertValidPromotionKeys(stagingKey, finalKey)).not.toThrow();
+
+      // Rejects promoting final -> staging, staging -> staging, or cross-workspace/artifact promotion
+      expect(() => assertValidPromotionKeys(finalKey, stagingKey)).toThrow(
+        StorageError
+      );
+      expect(() => assertValidPromotionKeys(stagingKey, stagingKey)).toThrow(
+        StorageError
+      );
+      expect(() =>
+        assertValidPromotionKeys(stagingKey, otherWorkspaceFinalKey)
+      ).toThrow(StorageError);
+      expect(() =>
+        assertValidPromotionKeys(stagingKey, otherArtifactFinalKey)
+      ).toThrow(StorageError);
 
       // Rejects traversal keys
       expect(() =>
@@ -279,7 +323,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
     });
   });
 
-  describe("Storage provider adapters & fail-closed behavior", () => {
+  describe("Storage provider adapters, staging-to-final promotion & fail-closed behavior", () => {
     let tempDir: string;
 
     beforeEach(async () => {
@@ -290,34 +334,48 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     });
 
-    it("stores, inspects, reads, and deletes objects in LocalFileStorageProvider outside public/", async () => {
+    it("stores, promotes from staging to final key, removes staging object, and resists staging overwrite in LocalFileStorageProvider", async () => {
       const localProvider = new LocalFileStorageProvider(tempDir);
-      const key = generateAttachmentStorageKey("ws_local", "art_local");
-
-      const beforeHead = await localProvider.headObject(key);
-      expect(beforeHead.exists).toBe(false);
+      const stagingKey = generateStagingStorageKey("ws_local", "art_local");
+      const finalKey = generateFinalStorageKey("ws_local", "art_local");
 
       await localProvider.putObject({
-        storageKey: key,
+        storageKey: stagingKey,
         bytes: VALID_PDF_BYTES,
         contentType: "application/pdf",
       });
 
-      const afterHead = await localProvider.headObject(key);
-      expect(afterHead.exists).toBe(true);
-      expect(afterHead.byteLength).toBe(VALID_PDF_BYTES.byteLength);
-      expect(afterHead.contentType).toBe("application/pdf");
+      const stagedHead = await localProvider.headObject(stagingKey);
+      expect(stagedHead.exists).toBe(true);
+      expect(stagedHead.byteLength).toBe(VALID_PDF_BYTES.byteLength);
 
-      const readBytes = await localProvider.getObjectBytes(key);
-      expect(readBytes).not.toBeNull();
-      expect(Buffer.from(readBytes!)).toEqual(Buffer.from(VALID_PDF_BYTES));
+      // Promote from stagingKey -> finalKey
+      const promoted = await localProvider.promoteObject({
+        sourceKey: stagingKey,
+        destinationKey: finalKey,
+        contentType: "application/pdf",
+      });
+      expect(promoted.byteLength).toBe(VALID_PDF_BYTES.byteLength);
 
-      await localProvider.deleteObject(key);
-      const deletedHead = await localProvider.headObject(key);
-      expect(deletedHead.exists).toBe(false);
+      // Staging object must be removed and final object must exist
+      expect((await localProvider.headObject(stagingKey)).exists).toBe(false);
+      const finalHead = await localProvider.headObject(finalKey);
+      expect(finalHead.exists).toBe(true);
+      expect(finalHead.byteLength).toBe(VALID_PDF_BYTES.byteLength);
 
-      // Idempotent second delete
-      await expect(localProvider.deleteObject(key)).resolves.toBeUndefined();
+      // Reusing the original stagingKey after promotion does NOT alter the finalized object
+      await localProvider.putObject({
+        storageKey: stagingKey,
+        bytes: VALID_TXT_BYTES,
+        contentType: "text/plain",
+      });
+
+      const finalBytes = await localProvider.getObjectBytes(finalKey);
+      expect(finalBytes).not.toBeNull();
+      expect(Buffer.from(finalBytes!)).toEqual(Buffer.from(VALID_PDF_BYTES));
+
+      await localProvider.deleteObject(finalKey);
+      expect((await localProvider.headObject(finalKey)).exists).toBe(false);
     });
 
     it("rejects configuring LocalFileStorageProvider inside public/", () => {
@@ -326,14 +384,15 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       ).toThrow(StorageConfigurationError);
     });
 
-    it("supports fault injection and retry recovery in InMemoryStorageProvider", async () => {
+    it("supports staging promotion, fault injection, and retry recovery in InMemoryStorageProvider", async () => {
       const mem = new InMemoryStorageProvider();
-      const key = generateAttachmentStorageKey("ws_mem", "art_mem");
+      const stagingKey = generateStagingStorageKey("ws_mem", "art_mem");
+      const finalKey = generateFinalStorageKey("ws_mem", "art_mem");
 
       mem.setFailNextPut(true);
       await expect(
         mem.putObject({
-          storageKey: key,
+          storageKey: stagingKey,
           bytes: VALID_PNG_BYTES,
           contentType: "image/png",
         })
@@ -342,19 +401,130 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       // Subsequent retry succeeds
       await expect(
         mem.putObject({
-          storageKey: key,
+          storageKey: stagingKey,
           bytes: VALID_PNG_BYTES,
           contentType: "image/png",
         })
       ).resolves.toEqual({ byteLength: VALID_PNG_BYTES.byteLength });
 
+      // Simulated promotion failure leaves staging object intact and creates no final object
+      mem.setFailNextPromote(true);
+      await expect(
+        mem.promoteObject({
+          sourceKey: stagingKey,
+          destinationKey: finalKey,
+          contentType: "image/png",
+        })
+      ).rejects.toThrow(StorageError);
+      expect(mem.hasKey(stagingKey)).toBe(true);
+      expect(mem.hasKey(finalKey)).toBe(false);
+
+      // Subsequent promotion retry succeeds and removes staging object
+      await expect(
+        mem.promoteObject({
+          sourceKey: stagingKey,
+          destinationKey: finalKey,
+          contentType: "image/png",
+        })
+      ).resolves.toEqual({ byteLength: VALID_PNG_BYTES.byteLength });
+      expect(mem.hasKey(stagingKey)).toBe(false);
+      expect(mem.hasKey(finalKey)).toBe(true);
+
       mem.setFailNextDelete(true);
-      await expect(mem.deleteObject(key)).rejects.toThrow(StorageError);
-      expect(mem.hasKey(key)).toBe(true);
+      await expect(mem.deleteObject(finalKey)).rejects.toThrow(StorageError);
+      expect(mem.hasKey(finalKey)).toBe(true);
 
       // Retry delete succeeds
-      await expect(mem.deleteObject(key)).resolves.toBeUndefined();
-      expect(mem.hasKey(key)).toBe(false);
+      await expect(mem.deleteObject(finalKey)).resolves.toBeUndefined();
+      expect(mem.hasKey(finalKey)).toBe(false);
+    });
+
+    it("enforces staging-only presigned upload URLs and atomic server-side copy+delete promotion in S3StorageProvider (mocked S3Client)", async () => {
+      const sentCommands: unknown[] = [];
+      let failStagingDelete = false;
+
+      const mockS3Client = {
+        config: {},
+        send: async (command: unknown) => {
+          sentCommands.push(command);
+          if (command instanceof HeadObjectCommand) {
+            return {
+              ContentLength: VALID_PDF_BYTES.byteLength,
+              ContentType: "application/pdf",
+            };
+          }
+          if (command instanceof CopyObjectCommand) {
+            return {};
+          }
+          if (command instanceof DeleteObjectCommand) {
+            const key = command.input.Key || "";
+            if (failStagingDelete && key.includes("/staging/")) {
+              throw new Error("Simulated S3 delete failure");
+            }
+            return {};
+          }
+          return {};
+        },
+      } as unknown as S3Client;
+
+      const s3Provider = new S3StorageProvider({
+        bucketName: "syncspace-test-private-bucket",
+        region: "us-east-1",
+        client: mockS3Client,
+      });
+
+      const stagingKey = generateStagingStorageKey("ws_s3", "art_s3");
+      const finalKey = generateFinalStorageKey("ws_s3", "art_s3");
+
+      // Presigned upload URL must reject final 'blobs/' keys so clients can never obtain upload credentials for final keys
+      await expect(
+        s3Provider.createPresignedUploadUrl({
+          storageKey: finalKey,
+          contentType: "application/pdf",
+          contentLength: VALID_PDF_BYTES.byteLength,
+        })
+      ).rejects.toThrow(StorageError);
+
+      // Promotion copies stagingKey -> finalKey and deletes stagingKey
+      const promoResult = await s3Provider.promoteObject({
+        sourceKey: stagingKey,
+        destinationKey: finalKey,
+        contentType: "application/pdf",
+      });
+      expect(promoResult.byteLength).toBe(VALID_PDF_BYTES.byteLength);
+
+      const copyCmd = sentCommands.find(
+        (c): c is CopyObjectCommand => c instanceof CopyObjectCommand
+      );
+      expect(copyCmd).toBeDefined();
+      expect(copyCmd!.input.Bucket).toBe("syncspace-test-private-bucket");
+      expect(copyCmd!.input.CopySource).toBe(
+        `syncspace-test-private-bucket/${stagingKey}`
+      );
+      expect(copyCmd!.input.Key).toBe(finalKey);
+      expect(copyCmd!.input.MetadataDirective).toBe("REPLACE");
+
+      const deleteCmd = sentCommands.find(
+        (c): c is DeleteObjectCommand => c instanceof DeleteObjectCommand
+      );
+      expect(deleteCmd).toBeDefined();
+      expect(deleteCmd!.input.Key).toBe(stagingKey);
+
+      // If deleting the staging object fails during S3 promotion, S3StorageProvider rolls back the destination copy
+      sentCommands.length = 0;
+      failStagingDelete = true;
+      await expect(
+        s3Provider.promoteObject({
+          sourceKey: stagingKey,
+          destinationKey: finalKey,
+          contentType: "application/pdf",
+        })
+      ).rejects.toThrow(StorageError);
+
+      const deleteAttempts = sentCommands.filter(
+        (c): c is DeleteObjectCommand => c instanceof DeleteObjectCommand
+      );
+      expect(deleteAttempts.map((d) => d.input.Key)).toContain(finalKey);
     });
 
     it("fails closed in production when S3 is unconfigured or set to local/placeholders", () => {

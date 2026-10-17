@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ArtifactService } from "@/services/artifact.service";
 import { VersionService } from "@/services/version.service";
 import {
+  AttachmentIntegrityError,
   AttachmentService,
   AttachmentValidationError,
 } from "@/services/attachment.service";
@@ -14,6 +15,8 @@ import {
 import {
   InMemoryStorageProvider,
   StorageError,
+  isFinalStorageKey,
+  isStagingStorageKey,
   setStorageProviderForTests,
 } from "@/lib/storage";
 import {
@@ -47,6 +50,8 @@ describe("Artifact File Attachments PostgreSQL Integration Tests", () => {
     memoryStorage.setFailNextDelete(false);
     memoryStorage.setFailNextGet(false);
     memoryStorage.setFailNextHead(false);
+    memoryStorage.setFailNextPromote(false);
+    AttachmentService.setFailNextCompleteTransactionForTests(false);
   });
 
   afterAll(async () => {
@@ -587,5 +592,364 @@ describe("Artifact File Attachments PostgreSQL Integration Tests", () => {
     expect(Buffer.from(downloadAfterRestore.bytes)).toEqual(
       Buffer.from(SAMPLE_PDF_BYTES)
     );
+  });
+
+  it("8. Promotes staged uploads to a distinct final key and prevents post-verification overwrites via reused staging keys", async () => {
+    const { editor1, viewer, workspace, doc } =
+      await createTestWorkspaceFixture();
+
+    const initiated = await AttachmentService.initiateUpload(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "immutable-contract.pdf",
+        fileType: "application/pdf",
+        fileSize: SAMPLE_PDF_BYTES.byteLength,
+      }
+    );
+
+    const pendingRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initiated.attachment.id },
+    });
+    const originalStagingKey = pendingRow.storageKey;
+
+    expect(pendingRow.status).toBe("PENDING");
+    expect(isStagingStorageKey(originalStagingKey)).toBe(true);
+    expect(originalStagingKey).toContain(
+      `workspaces/${workspace.id}/artifacts/${doc.id}/staging/`
+    );
+
+    // Simulate client uploading directly to the staging key
+    await memoryStorage.putObject({
+      storageKey: originalStagingKey,
+      bytes: SAMPLE_PDF_BYTES,
+      contentType: "application/pdf",
+    });
+    expect(memoryStorage.hasKey(originalStagingKey)).toBe(true);
+
+    // Complete upload -> validates staged bytes, promotes to final 'blobs/' key, and deletes staging object
+    const completed = await AttachmentService.completeUpload(
+      editor1.id,
+      doc.id,
+      initiated.attachment.id
+    );
+
+    const expectedSha256 = computeSha256Hex(SAMPLE_PDF_BYTES);
+    expect(completed.status).toBe("READY");
+    expect(completed.sha256).toBe(expectedSha256);
+
+    const finalizedRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: completed.id },
+    });
+    const finalStorageKey = finalizedRow.storageKey;
+
+    expect(finalStorageKey).not.toBe(originalStagingKey);
+    expect(isFinalStorageKey(finalStorageKey)).toBe(true);
+    expect(finalStorageKey).toContain(
+      `workspaces/${workspace.id}/artifacts/${doc.id}/blobs/`
+    );
+
+    // Staging object must be removed and final object must exist
+    expect(memoryStorage.hasKey(originalStagingKey)).toBe(false);
+    expect(memoryStorage.hasKey(finalStorageKey)).toBe(true);
+
+    // Simulate an attacker or buggy client reusing the still-valid presigned PUT URL (writing to originalStagingKey)
+    const tamperedPdfBytes = new TextEncoder().encode(
+      "%PDF-1.7\n1 0 obj\n<< /Tampered true >>\nendobj\n%%EOF\n"
+    );
+    await memoryStorage.putObject({
+      storageKey: originalStagingKey,
+      bytes: tamperedPdfBytes,
+      contentType: "application/pdf",
+    });
+
+    // Also attempt calling completeUpload again with tampered bytes
+    const repeatComplete = await AttachmentService.completeUpload(
+      editor1.id,
+      doc.id,
+      completed.id,
+      tamperedPdfBytes
+    );
+    expect(repeatComplete.sha256).toBe(expectedSha256);
+
+    // Verify the finalized attachment at finalStorageKey is completely untouched and serves original verified bytes
+    const download = await AttachmentService.getDownloadPayload(
+      viewer.id,
+      doc.id,
+      completed.id
+    );
+    expect(Buffer.from(download.bytes)).toEqual(Buffer.from(SAMPLE_PDF_BYTES));
+    expect(computeSha256Hex(download.bytes)).toBe(expectedSha256);
+  });
+
+  it("9. Blocks promotion of invalid staged bytes and keeps attachment PENDING if storage promotion fails", async () => {
+    const { editor1, workspace, doc } = await createTestWorkspaceFixture();
+
+    // Case A: Invalid staged bytes (MZ executable disguised as PDF) must never be promoted to blobs/
+    const badInit = await AttachmentService.initiateUpload(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "disguised-malware.pdf",
+        fileType: "application/pdf",
+        fileSize: 6,
+      }
+    );
+    const badPendingRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: badInit.attachment.id },
+    });
+    const badStagingKey = badPendingRow.storageKey;
+
+    await memoryStorage.putObject({
+      storageKey: badStagingKey,
+      bytes: new Uint8Array([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00]),
+      contentType: "application/pdf",
+    });
+
+    await expect(
+      AttachmentService.completeUpload(
+        editor1.id,
+        doc.id,
+        badInit.attachment.id
+      )
+    ).rejects.toThrow(AttachmentValidationError);
+
+    const failedRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: badInit.attachment.id },
+    });
+    expect(failedRow.status).toBe("FAILED");
+    expect(memoryStorage.hasKey(badStagingKey)).toBe(false);
+    expect(
+      memoryStorage
+        .getKeys()
+        .filter((k) =>
+          k.startsWith(`workspaces/${workspace.id}/artifacts/${doc.id}/blobs/`)
+        )
+    ).toHaveLength(0);
+
+    // Case B: Promotion failure does not mark attachment READY and allows clean retry
+    const validInit = await AttachmentService.initiateUpload(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "retryable-diagram.png",
+        fileType: "image/png",
+        fileSize: SAMPLE_PNG_BYTES.byteLength,
+      }
+    );
+    const validStagingRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: validInit.attachment.id },
+    });
+
+    await memoryStorage.putObject({
+      storageKey: validStagingRow.storageKey,
+      bytes: SAMPLE_PNG_BYTES,
+      contentType: "image/png",
+    });
+
+    memoryStorage.setFailNextPromote(true);
+    await expect(
+      AttachmentService.completeUpload(
+        editor1.id,
+        doc.id,
+        validInit.attachment.id
+      )
+    ).rejects.toThrow(StorageError);
+
+    const afterFailedPromoRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: validInit.attachment.id },
+    });
+    expect(afterFailedPromoRow.status).toBe("PENDING");
+    expect(afterFailedPromoRow.storageKey).toBe(validStagingRow.storageKey);
+    expect(memoryStorage.hasKey(validStagingRow.storageKey)).toBe(true);
+
+    // Retry completeUpload after storage recovers -> succeeds and promotes to final key
+    const recovered = await AttachmentService.completeUpload(
+      editor1.id,
+      doc.id,
+      validInit.attachment.id
+    );
+    expect(recovered.status).toBe("READY");
+    const recoveredRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: validInit.attachment.id },
+    });
+    expect(isFinalStorageKey(recoveredRow.storageKey)).toBe(true);
+    expect(memoryStorage.hasKey(validStagingRow.storageKey)).toBe(false);
+    expect(memoryStorage.hasKey(recoveredRow.storageKey)).toBe(true);
+  });
+
+  it("10. Recovers or cleans up safely without orphaned final objects when database transition fails after promotion", async () => {
+    const { editor1, workspace, doc } = await createTestWorkspaceFixture();
+
+    // Part A: Database failure after promotion -> cleans up promoted final key, keeps attachment PENDING, and succeeds on retry
+    const initRetry = await AttachmentService.initiateUpload(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "db-retry-spec.pdf",
+        fileType: "application/pdf",
+        fileSize: SAMPLE_PDF_BYTES.byteLength,
+      }
+    );
+    const retryPendingRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initRetry.attachment.id },
+    });
+    const retryStagingKey = retryPendingRow.storageKey;
+
+    await memoryStorage.putObject({
+      storageKey: retryStagingKey,
+      bytes: SAMPLE_PDF_BYTES,
+      contentType: "application/pdf",
+    });
+
+    AttachmentService.setFailNextCompleteTransactionForTests(true);
+    await expect(
+      AttachmentService.completeUpload(
+        editor1.id,
+        doc.id,
+        initRetry.attachment.id
+      )
+    ).rejects.toThrow(/Simulated database failure after object promotion/i);
+
+    const rowAfterDbFailure = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initRetry.attachment.id },
+    });
+    expect(rowAfterDbFailure.status).toBe("PENDING");
+    expect(rowAfterDbFailure.storageKey).toBe(retryStagingKey);
+
+    // No orphaned final 'blobs/' key may remain in storage after the rolled-back DB transaction
+    const blobKeysAfterDbFail = memoryStorage
+      .getKeys()
+      .filter((k) =>
+        k.startsWith(`workspaces/${workspace.id}/artifacts/${doc.id}/blobs/`)
+      );
+    expect(blobKeysAfterDbFail).toHaveLength(0);
+    // Staging key was restored so completeUpload can be retried
+    expect(memoryStorage.hasKey(retryStagingKey)).toBe(true);
+
+    // Retry completeUpload -> succeeds and transitions to READY with a clean final key
+    const completedOnRetry = await AttachmentService.completeUpload(
+      editor1.id,
+      doc.id,
+      initRetry.attachment.id
+    );
+    expect(completedOnRetry.status).toBe("READY");
+    const rowAfterRetry = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initRetry.attachment.id },
+    });
+    expect(isFinalStorageKey(rowAfterRetry.storageKey)).toBe(true);
+    expect(memoryStorage.hasKey(retryStagingKey)).toBe(false);
+    expect(memoryStorage.hasKey(rowAfterRetry.storageKey)).toBe(true);
+
+    // Part B: Database failure after promotion -> stale pending upload cleanup removes staging object and DB row cleanly
+    const initCleanup = await AttachmentService.initiateUpload(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "abandoned-after-db-error.txt",
+        fileType: "text/plain",
+        fileSize: SAMPLE_TXT_BYTES.byteLength,
+      }
+    );
+    const cleanupPendingRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: initCleanup.attachment.id },
+    });
+
+    await memoryStorage.putObject({
+      storageKey: cleanupPendingRow.storageKey,
+      bytes: SAMPLE_TXT_BYTES,
+      contentType: "text/plain",
+    });
+
+    AttachmentService.setFailNextCompleteTransactionForTests(true);
+    await expect(
+      AttachmentService.completeUpload(
+        editor1.id,
+        doc.id,
+        initCleanup.attachment.id
+      )
+    ).rejects.toThrow(/Simulated database failure after object promotion/i);
+
+    const cleanedCount = await AttachmentService.cleanupStalePendingUploadsForUser(
+      editor1.id,
+      new Date(Date.now() + 60_000)
+    );
+    expect(cleanedCount).toBe(1);
+    expect(memoryStorage.hasKey(cleanupPendingRow.storageKey)).toBe(false);
+    const deletedPendingRow = await prisma.attachment.findUnique({
+      where: { id: initCleanup.attachment.id },
+    });
+    expect(deletedPendingRow).toBeNull();
+  });
+
+  it("11. Verifies SHA-256 digest on retrieval, blocks corrupted downloads with safe error, and quarantines the attachment from READY list", async () => {
+    const { editor1, viewer, doc } = await createTestWorkspaceFixture();
+
+    const uploaded = await AttachmentService.uploadAttachment(
+      editor1.id,
+      doc.id,
+      {
+        fileName: "financial-controls.pdf",
+        fileType: "application/pdf",
+        bytes: SAMPLE_PDF_BYTES,
+      }
+    );
+
+    const readyRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: uploaded.id },
+    });
+    expect(readyRow.status).toBe("READY");
+    expect(readyRow.sha256).toBe(computeSha256Hex(SAMPLE_PDF_BYTES));
+
+    // Simulate out-of-band storage corruption on the finalized object
+    const corruptedBytes = new TextEncoder().encode(
+      "%PDF-1.7\n1 0 obj\n<< /Corrupted true >>\nendobj\n%%EOF\n"
+    );
+    memoryStorage.corruptObjectBytesForTests(
+      readyRow.storageKey,
+      corruptedBytes
+    );
+
+    // Retrieval must verify checksum, block download, and never expose internal storageKey or paths
+    let caughtError: unknown = null;
+    try {
+      await AttachmentService.getDownloadPayload(
+        viewer.id,
+        doc.id,
+        uploaded.id
+      );
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(AttachmentIntegrityError);
+    const errorMessage = (caughtError as Error).message;
+    expect(errorMessage).toMatch(/integrity|checksum/i);
+    expect(errorMessage).not.toContain(readyRow.storageKey);
+    expect(errorMessage).not.toContain("workspaces/");
+
+    // Attachment must be transitioned to FAILED and removed from READY listings
+    const quarantinedRow = await prisma.attachment.findUniqueOrThrow({
+      where: { id: uploaded.id },
+    });
+    expect(quarantinedRow.status).toBe("FAILED");
+    expect(quarantinedRow.failureReason).toMatch(/SHA-256 digest mismatch/i);
+    expect(quarantinedRow.failureReason).not.toContain(readyRow.storageKey);
+
+    const listAfterMismatch = await AttachmentService.listAttachments(
+      viewer.id,
+      doc.id
+    );
+    expect(listAfterMismatch.items).toHaveLength(0);
+
+    // Server-side integrity audit event recorded
+    const integrityEvent = await prisma.activityEvent.findFirst({
+      where: {
+        entityType: "ATTACHMENT",
+        entityId: uploaded.id,
+        action: "ATTACHMENT_INTEGRITY_FAILED",
+      },
+    });
+    expect(integrityEvent).not.toBeNull();
   });
 });

@@ -5,6 +5,8 @@ import {
   NotFoundError,
 } from "@/services/authorization.service";
 import {
+  assertFinalStorageKey,
+  assertStagingStorageKey,
   getStorageProvider,
   StorageError,
   type PresignedUploadTarget,
@@ -15,7 +17,9 @@ import {
   MAX_ATTACHMENTS_PER_ARTIFACT,
   MAX_PENDING_UPLOADS_PER_USER,
   buildContentDispositionHeader,
-  generateAttachmentStorageKey,
+  computeSha256Hex,
+  generateFinalStorageKey,
+  generateStagingStorageKey,
   hasForbiddenExtension,
   isAllowedMimeType,
   normalizeMimeType,
@@ -30,6 +34,16 @@ export class AttachmentValidationError extends Error {
   ) {
     super(message);
     this.name = "AttachmentValidationError";
+  }
+}
+
+export class AttachmentIntegrityError extends AttachmentValidationError {
+  constructor(
+    message: string = "Attachment integrity verification failed: stored checksum mismatch.",
+    public statusCode: number = 500
+  ) {
+    super(message, statusCode);
+    this.name = "AttachmentIntegrityError";
   }
 }
 
@@ -130,6 +144,15 @@ function toPublicAttachmentItem(
 }
 
 export class AttachmentService {
+  private static failNextCompleteTransaction = false;
+
+  /**
+   * Test-only hook to simulate a database transaction failure right after storage promotion succeeds.
+   */
+  public static setFailNextCompleteTransactionForTests(fail = true): void {
+    this.failNextCompleteTransaction = fail;
+  }
+
   /**
    * Lists verified READY attachments for an artifact.
    * Enforces active workspace membership, non-archived artifact state, and artifact VIEW permission.
@@ -196,6 +219,7 @@ export class AttachmentService {
   /**
    * Initiates a pending attachment upload after validating permissions, rate/concurrency limits,
    * filename safety, allowlisted MIME type, and file size.
+   * Allocates a dedicated staging object key so presigned upload URLs never target final READY keys.
    */
   static async initiateUpload(
     userId: string,
@@ -292,7 +316,8 @@ export class AttachmentService {
         );
       }
 
-      const storageKey = generateAttachmentStorageKey(
+      // Dedicated staging key for unverified client uploads
+      const stagingKey = generateStagingStorageKey(
         artifact.workspaceId,
         artifact.id
       );
@@ -304,7 +329,7 @@ export class AttachmentService {
           fileName: sanitizedFileName,
           fileType: normalizedMime,
           fileSize: input.fileSize,
-          storageKey,
+          storageKey: stagingKey,
           status: "PENDING",
           uploadedById: userId,
         },
@@ -360,9 +385,11 @@ export class AttachmentService {
   }
 
   /**
-   * Verifies the stored object in private storage and marks a PENDING attachment as READY.
+   * Verifies the staged object in private storage, promotes the validated bytes to a distinct
+   * immutable final storage key ('workspaces/.../blobs/...'), removes the staging object, and
+   * atomically transitions the attachment from PENDING to READY.
+   *
    * Idempotent for already-READY attachments belonging to the same uploader and artifact.
-   * If optionalBytes are supplied, writes them to storage prior to verification.
    */
   static async completeUpload(
     userId: string,
@@ -407,8 +434,9 @@ export class AttachmentService {
       );
     }
 
-    // Idempotent return if already completed
+    // Idempotent return if already completed; never overwrite finalized storage
     if (existing.status === "READY") {
+      assertFinalStorageKey(existing.storageKey);
       return toPublicAttachmentItem(existing, {
         userId,
         effectiveRole,
@@ -423,13 +451,16 @@ export class AttachmentService {
       );
     }
 
+    const stagingKey = existing.storageKey;
+    assertStagingStorageKey(stagingKey);
+
     const storage = getStorageProvider();
 
     if (optionalBytes) {
       if (optionalBytes.byteLength !== existing.fileSize) {
         await this.markUploadFailedAndCleanup(
           existing.id,
-          existing.storageKey,
+          stagingKey,
           `Uploaded byte length (${optionalBytes.byteLength}) does not match declared file size (${existing.fileSize}).`
         );
         throw new AttachmentValidationError(
@@ -447,7 +478,7 @@ export class AttachmentService {
       if (!precheck.valid) {
         await this.markUploadFailedAndCleanup(
           existing.id,
-          existing.storageKey,
+          stagingKey,
           precheck.error || "File content validation failed."
         );
         throw new AttachmentValidationError(
@@ -457,17 +488,17 @@ export class AttachmentService {
       }
 
       await storage.putObject({
-        storageKey: existing.storageKey,
+        storageKey: stagingKey,
         bytes: optionalBytes,
         contentType: existing.fileType,
       });
     }
 
-    // Verify stored object metadata & content in private storage
-    const head = await storage.headObject(existing.storageKey);
+    // Verify staged object metadata & content in private storage
+    const head = await storage.headObject(stagingKey);
     if (!head.exists) {
       throw new AttachmentValidationError(
-        "Uploaded object was not found in private storage. Complete the upload before finalizing.",
+        "Uploaded object was not found in private staging storage. Complete the upload before finalizing.",
         400
       );
     }
@@ -479,7 +510,7 @@ export class AttachmentService {
     ) {
       await this.markUploadFailedAndCleanup(
         existing.id,
-        existing.storageKey,
+        stagingKey,
         `Stored object size (${head.byteLength}) does not match declared size (${existing.fileSize}).`
       );
       throw new AttachmentValidationError(
@@ -488,8 +519,13 @@ export class AttachmentService {
       );
     }
 
-    const storedBytes = await storage.getObjectBytes(existing.storageKey);
-    if (!storedBytes) {
+    const storedBytes = await storage.getObjectBytes(stagingKey);
+    if (!storedBytes || storedBytes.byteLength !== existing.fileSize) {
+      await this.markUploadFailedAndCleanup(
+        existing.id,
+        stagingKey,
+        "Failed to read full staged object for content verification."
+      );
       throw new AttachmentValidationError(
         "Failed to read uploaded object for content verification.",
         400
@@ -502,10 +538,10 @@ export class AttachmentService {
       fileName: existing.fileName,
     });
 
-    if (!validation.valid) {
+    if (!validation.valid || !validation.sha256) {
       await this.markUploadFailedAndCleanup(
         existing.id,
-        existing.storageKey,
+        stagingKey,
         validation.error || "File signature verification failed."
       );
       throw new AttachmentValidationError(
@@ -514,95 +550,182 @@ export class AttachmentService {
       );
     }
 
-    // Atomically transition to READY inside transaction with re-validated authorization
-    const finalized = await prisma.$transaction(async (tx) => {
-      const txAccess = await AuthorizationService.requireArtifactAccessTx(
-        tx,
-        userId,
-        artifactId,
-        "EDIT"
-      );
+    // Re-check authorization prior to promoting staged object to final key
+    await AuthorizationService.requireArtifactAccess(
+      userId,
+      artifactId,
+      "EDIT"
+    );
 
-      const current = await tx.attachment.findUnique({
-        where: { id: existing.id },
-        include: {
-          uploadedBy: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              image: true,
-              color: true,
-            },
-          },
-        },
-      });
+    const finalStorageKey = generateFinalStorageKey(
+      artifact.workspaceId,
+      artifact.id
+    );
 
-      if (
-        !current ||
-        current.artifactId !== txAccess.artifact.id ||
-        current.workspaceId !== txAccess.artifact.workspaceId
-      ) {
-        throw new NotFoundError("Attachment not found.");
-      }
+    // Promote validated staged object to distinct final storage key and remove staging object
+    await storage.promoteObject({
+      sourceKey: stagingKey,
+      destinationKey: finalStorageKey,
+      contentType: existing.fileType,
+    });
 
-      if (current.status === "READY") {
-        return {
-          row: current,
-          effectiveRole: txAccess.effectiveRole,
-          workspaceRole: txAccess.membership.role,
-        };
-      }
-
-      if (current.status !== "PENDING") {
-        throw new AttachmentValidationError(
-          `Cannot complete attachment in '${current.status}' state.`,
-          409
+    // Atomically transition to READY with the final storage key and validated SHA-256 digest
+    let finalized;
+    try {
+      if (this.failNextCompleteTransaction) {
+        this.failNextCompleteTransaction = false;
+        throw new Error(
+          "Simulated database failure after object promotion."
         );
       }
 
-      const updated = await tx.attachment.update({
-        where: { id: current.id },
-        data: {
-          status: "READY",
-          sha256: validation.sha256 ?? null,
-          failureReason: null,
-        },
-        include: {
-          uploadedBy: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              image: true,
-              color: true,
+      finalized = await prisma.$transaction(async (tx) => {
+        const txAccess = await AuthorizationService.requireArtifactAccessTx(
+          tx,
+          userId,
+          artifactId,
+          "EDIT"
+        );
+
+        const current = await tx.attachment.findUnique({
+          where: { id: existing.id },
+          include: {
+            uploadedBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                image: true,
+                color: true,
+              },
             },
           },
-        },
-      });
+        });
 
-      await tx.activityEvent.create({
-        data: {
-          workspaceId: txAccess.artifact.workspaceId,
-          userId,
-          action: "UPLOADED_ATTACHMENT",
-          entityType: "ATTACHMENT",
-          entityId: updated.id,
-          metadata: {
-            artifactId: txAccess.artifact.id,
-            fileName: updated.fileName,
-            fileType: updated.fileType,
-            fileSize: updated.fileSize,
+        if (
+          !current ||
+          current.artifactId !== txAccess.artifact.id ||
+          current.workspaceId !== txAccess.artifact.workspaceId
+        ) {
+          throw new NotFoundError("Attachment not found.");
+        }
+
+        if (current.status === "READY") {
+          return {
+            row: current,
+            alreadyReady: true,
+            effectiveRole: txAccess.effectiveRole,
+            workspaceRole: txAccess.membership.role,
+          };
+        }
+
+        if (current.status !== "PENDING") {
+          throw new AttachmentValidationError(
+            `Cannot complete attachment in '${current.status}' state.`,
+            409
+          );
+        }
+
+        const claim = await tx.attachment.updateMany({
+          where: {
+            id: current.id,
+            status: "PENDING",
+            storageKey: stagingKey,
           },
-        },
-      });
+          data: {
+            status: "READY",
+            storageKey: finalStorageKey,
+            sha256: validation.sha256,
+            failureReason: null,
+          },
+        });
 
-      return {
-        row: updated,
-        effectiveRole: txAccess.effectiveRole,
-        workspaceRole: txAccess.membership.role,
-      };
-    });
+        if (claim.count === 0) {
+          const raced = await tx.attachment.findUnique({
+            where: { id: current.id },
+            include: {
+              uploadedBy: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  image: true,
+                  color: true,
+                },
+              },
+            },
+          });
+
+          if (raced && raced.status === "READY") {
+            return {
+              row: raced,
+              alreadyReady: true,
+              effectiveRole: txAccess.effectiveRole,
+              workspaceRole: txAccess.membership.role,
+            };
+          }
+
+          throw new AttachmentValidationError(
+            "Attachment upload state changed concurrently.",
+            409
+          );
+        }
+
+        const updated = await tx.attachment.findUniqueOrThrow({
+          where: { id: current.id },
+          include: {
+            uploadedBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                image: true,
+                color: true,
+              },
+            },
+          },
+        });
+
+        await tx.activityEvent.create({
+          data: {
+            workspaceId: txAccess.artifact.workspaceId,
+            userId,
+            action: "UPLOADED_ATTACHMENT",
+            entityType: "ATTACHMENT",
+            entityId: updated.id,
+            metadata: {
+              artifactId: txAccess.artifact.id,
+              fileName: updated.fileName,
+              fileType: updated.fileType,
+              fileSize: updated.fileSize,
+              sha256: validation.sha256,
+            },
+          },
+        });
+
+        return {
+          row: updated,
+          alreadyReady: false,
+          effectiveRole: txAccess.effectiveRole,
+          workspaceRole: txAccess.membership.role,
+        };
+      });
+    } catch (dbErr) {
+      await this.handlePostPromotionDatabaseFailure({
+        attachmentId: existing.id,
+        stagingKey,
+        finalKey: finalStorageKey,
+        contentType: existing.fileType,
+        validatedBytes: storedBytes,
+        error: dbErr,
+      });
+      throw dbErr;
+    }
+
+    if (finalized.alreadyReady && finalized.row.storageKey !== finalStorageKey) {
+      // Another concurrent completion request finalized first; remove our redundant promoted object
+      await storage.deleteObject(finalStorageKey).catch(() => {});
+    }
 
     return toPublicAttachmentItem(finalized.row, {
       userId,
@@ -612,8 +735,95 @@ export class AttachmentService {
   }
 
   /**
+   * Compensates when storage promotion succeeded but the database transition failed:
+   * - For authorization/validation errors: deletes the promoted final object and marks the attachment FAILED.
+   * - For transient database errors: restores the validated bytes to the staging key and removes the
+   *   unreferenced final object so that:
+   *     (a) no orphaned final object remains in storage,
+   *     (b) the attachment remains PENDING (never READY), and
+   *     (c) the caller can safely retry completeUpload() or let stale pending cleanup remove it.
+   */
+  private static async handlePostPromotionDatabaseFailure(params: {
+    attachmentId: string;
+    stagingKey: string;
+    finalKey: string;
+    contentType: string;
+    validatedBytes: Uint8Array;
+    error: unknown;
+  }): Promise<void> {
+    const {
+      attachmentId,
+      stagingKey,
+      finalKey,
+      contentType,
+      validatedBytes,
+      error,
+    } = params;
+    const storage = getStorageProvider();
+
+    const isPermanentRejection =
+      error instanceof AuthorizationError ||
+      error instanceof NotFoundError ||
+      error instanceof AttachmentValidationError;
+
+    if (isPermanentRejection) {
+      await storage.deleteObject(finalKey).catch(() => {});
+      await this.markUploadFailedAndCleanup(
+        attachmentId,
+        stagingKey,
+        error instanceof Error ? error.message : "Upload completion rejected."
+      );
+      return;
+    }
+
+    // Transient database failure: restore staging object for safe retry and remove unreferenced final object
+    let stagingRestored = false;
+    try {
+      await storage.putObject({
+        storageKey: stagingKey,
+        bytes: validatedBytes,
+        contentType,
+      });
+      stagingRestored = true;
+    } catch {
+      stagingRestored = false;
+    }
+
+    try {
+      await storage.deleteObject(finalKey);
+    } catch {
+      // If deleting the promoted finalKey also fails, point the FAILED record at finalKey so retryCleanupForArtifact removes it
+      await prisma.attachment
+        .updateMany({
+          where: { id: attachmentId, status: "PENDING" },
+          data: {
+            storageKey: finalKey,
+            status: "FAILED",
+            failureReason:
+              "Database transition and promoted object cleanup failed; scheduled for storage cleanup.",
+          },
+        })
+        .catch(() => {});
+      return;
+    }
+
+    if (!stagingRestored) {
+      await prisma.attachment
+        .updateMany({
+          where: { id: attachmentId, status: "PENDING" },
+          data: {
+            status: "FAILED",
+            failureReason:
+              "Database transition failed after promotion; upload must be re-initiated.",
+          },
+        })
+        .catch(() => {});
+    }
+  }
+
+  /**
    * Convenience server-side upload that validates content, creates a PENDING record,
-   * writes bytes to private storage, and completes verification to READY.
+   * writes bytes to private staging storage, and completes verification + promotion to READY.
    * Cleans up storage and marks FAILED if any step fails.
    */
   static async uploadAttachment(
@@ -669,7 +879,8 @@ export class AttachmentService {
 
   /**
    * Authorizes and retrieves an attachment's verified bytes and safe response headers for download or inline preview.
-   * Re-checks workspace membership, archived artifact state, and explicit NONE overrides on every request.
+   * Re-checks workspace membership, archived artifact state, explicit NONE overrides, final storage key format,
+   * and SHA-256 content integrity on every request.
    */
   static async getDownloadPayload(
     userId: string,
@@ -712,11 +923,31 @@ export class AttachmentService {
       throw new NotFoundError("Attachment not found.");
     }
 
+    // Finalized READY attachments must reference a final blobs key, never a staging key
+    assertFinalStorageKey(row.storageKey);
+
     const storage = getStorageProvider();
     const bytes = await storage.getObjectBytes(row.storageKey);
 
     if (!bytes) {
       throw new NotFoundError("Attachment file content not found in storage.");
+    }
+
+    // Verify SHA-256 digest before returning bytes whenever a stored checksum exists
+    if (row.sha256) {
+      const actualSha256 = computeSha256Hex(bytes);
+      if (actualSha256.toLowerCase() !== row.sha256.toLowerCase()) {
+        await this.recordIntegrityFailure({
+          attachmentId: row.id,
+          workspaceId: row.workspaceId,
+          artifactId: artifact.id,
+          userId,
+        });
+        throw new AttachmentIntegrityError(
+          "Attachment integrity verification failed: stored checksum mismatch.",
+          500
+        );
+      }
     }
 
     const contentDisposition = buildContentDispositionHeader(
@@ -748,6 +979,49 @@ export class AttachmentService {
         workspaceRole: membership.role,
       }),
     };
+  }
+
+  /**
+   * Records a server-side integrity failure without exposing internal paths or storage keys,
+   * and transitions the attachment out of READY so it is no longer advertised as downloadable.
+   */
+  private static async recordIntegrityFailure(params: {
+    attachmentId: string;
+    workspaceId: string;
+    artifactId: string;
+    userId: string;
+  }): Promise<void> {
+    const { attachmentId, workspaceId, artifactId, userId } = params;
+    try {
+      await prisma.$transaction([
+        prisma.attachment.updateMany({
+          where: {
+            id: attachmentId,
+            status: "READY",
+          },
+          data: {
+            status: "FAILED",
+            failureReason:
+              "Integrity verification failed at retrieval: stored SHA-256 digest mismatch.",
+          },
+        }),
+        prisma.activityEvent.create({
+          data: {
+            workspaceId,
+            userId,
+            action: "ATTACHMENT_INTEGRITY_FAILED",
+            entityType: "ATTACHMENT",
+            entityId: attachmentId,
+            metadata: {
+              artifactId,
+              reason: "Stored SHA-256 checksum mismatch detected on retrieval.",
+            },
+          },
+        }),
+      ]);
+    } catch {
+      // Best-effort status quarantine if DB write encounters transient error
+    }
   }
 
   /**

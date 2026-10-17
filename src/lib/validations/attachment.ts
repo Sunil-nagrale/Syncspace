@@ -175,9 +175,27 @@ export function hasForbiddenExtension(fileName: string): boolean {
 }
 
 /**
- * Generates an unpredictable, path-safe storage object key completely independent of user-supplied filenames.
+ * Generates an unpredictable, path-safe staging object key for unverified client uploads.
+ * Presigned upload URLs are scoped exclusively to staging keys.
  */
-export function generateAttachmentStorageKey(
+export function generateStagingStorageKey(
+  workspaceId: string,
+  artifactId: string
+): string {
+  const safeIdPattern = /^[a-zA-Z0-9_-]+$/;
+  if (!safeIdPattern.test(workspaceId) || !safeIdPattern.test(artifactId)) {
+    throw new Error("Invalid workspace or artifact identifier for storage key.");
+  }
+
+  const uniqueToken = `${randomUUID()}-${randomBytes(8).toString("hex")}`;
+  return `workspaces/${workspaceId}/artifacts/${artifactId}/staging/${uniqueToken}`;
+}
+
+/**
+ * Generates an unpredictable, path-safe final object key for verified READY attachments.
+ * Clients never receive upload credentials or URLs for final keys.
+ */
+export function generateFinalStorageKey(
   workspaceId: string,
   artifactId: string
 ): string {
@@ -188,6 +206,21 @@ export function generateAttachmentStorageKey(
 
   const uniqueToken = `${randomUUID()}-${randomBytes(8).toString("hex")}`;
   return `workspaces/${workspaceId}/artifacts/${artifactId}/blobs/${uniqueToken}`;
+}
+
+/**
+ * Generates an unpredictable, path-safe storage object key completely independent of user-supplied filenames.
+ * Defaults to generating a finalized ("blobs") key unless "staging" is specified.
+ */
+export function generateAttachmentStorageKey(
+  workspaceId: string,
+  artifactId: string,
+  stage: "staging" | "final" = "final"
+): string {
+  if (stage === "staging") {
+    return generateStagingStorageKey(workspaceId, artifactId);
+  }
+  return generateFinalStorageKey(workspaceId, artifactId);
 }
 
 /**

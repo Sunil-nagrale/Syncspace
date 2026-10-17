@@ -6,6 +6,7 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   DeleteObjectCommand,
+  CopyObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -57,6 +58,12 @@ export interface StorageProvider {
     maxBytes?: number
   ): Promise<Uint8Array | null>;
 
+  promoteObject(params: {
+    sourceKey: string;
+    destinationKey: string;
+    contentType?: string;
+  }): Promise<{ byteLength: number }>;
+
   createPresignedUploadUrl?(params: {
     storageKey: string;
     contentType: string;
@@ -74,12 +81,18 @@ export interface StorageProvider {
   deleteObject(storageKey: string): Promise<void>;
 }
 
+const STAGING_STORAGE_KEY_PATTERN =
+  /^workspaces\/([a-zA-Z0-9_-]+)\/artifacts\/([a-zA-Z0-9_-]+)\/staging\/([a-zA-Z0-9_-]+)$/;
+
+const FINAL_STORAGE_KEY_PATTERN =
+  /^workspaces\/([a-zA-Z0-9_-]+)\/artifacts\/([a-zA-Z0-9_-]+)\/blobs\/([a-zA-Z0-9_-]+)$/;
+
 const SAFE_STORAGE_KEY_PATTERN =
-  /^workspaces\/[a-zA-Z0-9_-]+\/artifacts\/[a-zA-Z0-9_-]+\/blobs\/[a-zA-Z0-9_-]+$/;
+  /^workspaces\/[a-zA-Z0-9_-]+\/artifacts\/[a-zA-Z0-9_-]+\/(?:staging|blobs)\/[a-zA-Z0-9_-]+$/;
 
 /**
  * Validates that a storageKey adheres strictly to the generated internal key format
- * and contains no path traversal, backslashes, or arbitrary user-controlled segments.
+ * (either staging or final blobs) and contains no path traversal, backslashes, or arbitrary user-controlled segments.
  */
 export function assertSafeStorageKey(storageKey: string): void {
   if (
@@ -91,6 +104,76 @@ export function assertSafeStorageKey(storageKey: string): void {
     !SAFE_STORAGE_KEY_PATTERN.test(storageKey)
   ) {
     throw new StorageError("Invalid or unsafe storage key rejected.", 400);
+  }
+}
+
+export function isStagingStorageKey(storageKey: string): boolean {
+  return (
+    typeof storageKey === "string" &&
+    !storageKey.includes("..") &&
+    STAGING_STORAGE_KEY_PATTERN.test(storageKey)
+  );
+}
+
+export function isFinalStorageKey(storageKey: string): boolean {
+  return (
+    typeof storageKey === "string" &&
+    !storageKey.includes("..") &&
+    FINAL_STORAGE_KEY_PATTERN.test(storageKey)
+  );
+}
+
+export function assertStagingStorageKey(storageKey: string): void {
+  assertSafeStorageKey(storageKey);
+  if (!isStagingStorageKey(storageKey)) {
+    throw new StorageError(
+      "Expected a staging storage key ('workspaces/.../staging/...').",
+      400
+    );
+  }
+}
+
+export function assertFinalStorageKey(storageKey: string): void {
+  assertSafeStorageKey(storageKey);
+  if (!isFinalStorageKey(storageKey)) {
+    throw new StorageError(
+      "Expected a finalized storage key ('workspaces/.../blobs/...').",
+      400
+    );
+  }
+}
+
+/**
+ * Validates that a promotion operation moves strictly from a staging key to a distinct final key
+ * within the exact same workspace and artifact scope.
+ */
+export function assertValidPromotionKeys(
+  sourceKey: string,
+  destinationKey: string
+): void {
+  assertStagingStorageKey(sourceKey);
+  assertFinalStorageKey(destinationKey);
+
+  if (sourceKey === destinationKey) {
+    throw new StorageError(
+      "Promotion destination key must be distinct from the staging source key.",
+      400
+    );
+  }
+
+  const srcMatch = STAGING_STORAGE_KEY_PATTERN.exec(sourceKey);
+  const destMatch = FINAL_STORAGE_KEY_PATTERN.exec(destinationKey);
+
+  if (
+    !srcMatch ||
+    !destMatch ||
+    srcMatch[1] !== destMatch[1] ||
+    srcMatch[2] !== destMatch[2]
+  ) {
+    throw new StorageError(
+      "Cannot promote object across mismatched workspace or artifact scopes.",
+      400
+    );
   }
 }
 
@@ -112,6 +195,7 @@ export interface S3StorageConfig {
   accessKeyId?: string;
   secretAccessKey?: string;
   forcePathStyle?: boolean;
+  client?: S3Client;
 }
 
 /**
@@ -136,6 +220,11 @@ export class S3StorageProvider implements StorageProvider {
     }
 
     this.bucketName = config.bucketName;
+
+    if (config.client) {
+      this.client = config.client;
+      return;
+    }
 
     const hasExplicitCredentials =
       config.accessKeyId &&
@@ -240,13 +329,75 @@ export class S3StorageProvider implements StorageProvider {
     }
   }
 
+  async promoteObject(params: {
+    sourceKey: string;
+    destinationKey: string;
+    contentType?: string;
+  }): Promise<{ byteLength: number }> {
+    assertValidPromotionKeys(params.sourceKey, params.destinationKey);
+
+    const head = await this.headObject(params.sourceKey);
+    if (!head.exists) {
+      throw new StorageError(
+        "Staged object was not found in storage for promotion.",
+        404
+      );
+    }
+
+    try {
+      await this.client.send(
+        new CopyObjectCommand({
+          Bucket: this.bucketName,
+          CopySource: encodeURI(`${this.bucketName}/${params.sourceKey}`),
+          Key: params.destinationKey,
+          ContentType:
+            params.contentType ||
+            head.contentType ||
+            "application/octet-stream",
+          MetadataDirective: "REPLACE",
+        })
+      );
+    } catch {
+      throw new StorageError(
+        "Failed to promote validated object to final storage key.",
+        502
+      );
+    }
+
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucketName,
+          Key: params.sourceKey,
+        })
+      );
+    } catch {
+      // Roll back the destination copy if staging cleanup fails so promotion remains atomic
+      await this.client
+        .send(
+          new DeleteObjectCommand({
+            Bucket: this.bucketName,
+            Key: params.destinationKey,
+          })
+        )
+        .catch(() => {});
+      throw new StorageError(
+        "Failed to remove staging object after promotion.",
+        502
+      );
+    }
+
+    return { byteLength: head.byteLength };
+  }
+
   async createPresignedUploadUrl(params: {
     storageKey: string;
     contentType: string;
     contentLength: number;
     expiresInSeconds?: number;
   }): Promise<PresignedUploadTarget> {
-    assertSafeStorageKey(params.storageKey);
+    // Presigned upload URLs are strictly restricted to staging keys; never sign upload URLs for final keys
+    assertStagingStorageKey(params.storageKey);
     const expiresInSeconds = Math.min(
       Math.max(params.expiresInSeconds ?? 300, 30),
       900
@@ -284,7 +435,7 @@ export class S3StorageProvider implements StorageProvider {
     contentType: string;
     expiresInSeconds?: number;
   }): Promise<{ url: string; expiresInSeconds: number }> {
-    assertSafeStorageKey(params.storageKey);
+    assertFinalStorageKey(params.storageKey);
     const expiresInSeconds = Math.min(
       Math.max(params.expiresInSeconds ?? 120, 30),
       600
@@ -448,6 +599,63 @@ export class LocalFileStorageProvider implements StorageProvider {
     }
   }
 
+  async promoteObject(params: {
+    sourceKey: string;
+    destinationKey: string;
+    contentType?: string;
+  }): Promise<{ byteLength: number }> {
+    assertValidPromotionKeys(params.sourceKey, params.destinationKey);
+
+    const head = await this.headObject(params.sourceKey);
+    if (!head.exists) {
+      throw new StorageError(
+        "Staged object was not found in local storage for promotion.",
+        404
+      );
+    }
+
+    const srcPaths = this.resolveObjectPaths(params.sourceKey);
+    const destPaths = this.resolveObjectPaths(params.destinationKey);
+    const destDir = path.dirname(destPaths.blobPath);
+    const tmpDestPath = `${destPaths.blobPath}.${process.pid}.${Date.now()}.tmp`;
+
+    try {
+      await fs.mkdir(destDir, { recursive: true });
+      await fs.copyFile(srcPaths.blobPath, tmpDestPath);
+      await fs.rename(tmpDestPath, destPaths.blobPath);
+      await fs.writeFile(
+        destPaths.metaPath,
+        JSON.stringify({
+          contentType:
+            params.contentType ||
+            head.contentType ||
+            "application/octet-stream",
+          byteLength: head.byteLength,
+          promotedAt: new Date().toISOString(),
+        }),
+        "utf-8"
+      );
+    } catch {
+      await fs.unlink(tmpDestPath).catch(() => {});
+      await fs.unlink(destPaths.blobPath).catch(() => {});
+      await fs.unlink(destPaths.metaPath).catch(() => {});
+      throw new StorageError(
+        "Failed to promote staged object to final local storage location.",
+        500
+      );
+    }
+
+    try {
+      await this.deleteObject(params.sourceKey);
+    } catch (err) {
+      await fs.unlink(destPaths.blobPath).catch(() => {});
+      await fs.unlink(destPaths.metaPath).catch(() => {});
+      throw err;
+    }
+
+    return { byteLength: head.byteLength };
+  }
+
   async deleteObject(storageKey: string): Promise<void> {
     const { blobPath, metaPath } = this.resolveObjectPaths(storageKey);
     try {
@@ -480,6 +688,7 @@ export class InMemoryStorageProvider implements StorageProvider {
   private failNextDelete = false;
   private failNextGet = false;
   private failNextHead = false;
+  private failNextPromote = false;
 
   public setFailNextPut(fail = true): void {
     this.failNextPut = fail;
@@ -497,20 +706,46 @@ export class InMemoryStorageProvider implements StorageProvider {
     this.failNextHead = fail;
   }
 
+  public setFailNextPromote(fail = true): void {
+    this.failNextPromote = fail;
+  }
+
   public clear(): void {
     this.store.clear();
     this.failNextPut = false;
     this.failNextDelete = false;
     this.failNextGet = false;
     this.failNextHead = false;
+    this.failNextPromote = false;
   }
 
   public hasKey(storageKey: string): boolean {
     return this.store.has(storageKey);
   }
 
+  public getKeys(): string[] {
+    return Array.from(this.store.keys());
+  }
+
   public size(): number {
     return this.store.size;
+  }
+
+  /**
+   * Test-only helper to simulate bitrot or unauthorized out-of-band storage corruption
+   * for testing retrieval-time SHA-256 integrity verification.
+   */
+  public corruptObjectBytesForTests(
+    storageKey: string,
+    corruptedBytes: Uint8Array
+  ): void {
+    const existing = this.store.get(storageKey);
+    const copy = new Uint8Array(corruptedBytes.byteLength);
+    copy.set(corruptedBytes);
+    this.store.set(storageKey, {
+      bytes: copy,
+      contentType: existing?.contentType ?? "application/octet-stream",
+    });
   }
 
   async putObject(params: {
@@ -566,6 +801,40 @@ export class InMemoryStorageProvider implements StorageProvider {
       return entry.bytes.slice(0, maxBytes);
     }
     return entry.bytes.slice();
+  }
+
+  async promoteObject(params: {
+    sourceKey: string;
+    destinationKey: string;
+    contentType?: string;
+  }): Promise<{ byteLength: number }> {
+    assertValidPromotionKeys(params.sourceKey, params.destinationKey);
+    if (this.failNextPromote) {
+      this.failNextPromote = false;
+      throw new StorageError("Simulated storage promotion failure.", 502);
+    }
+    const entry = this.store.get(params.sourceKey);
+    if (!entry) {
+      throw new StorageError(
+        "Staged object was not found in memory storage for promotion.",
+        404
+      );
+    }
+    if (this.failNextDelete) {
+      this.failNextDelete = false;
+      throw new StorageError(
+        "Simulated staging removal failure during promotion.",
+        502
+      );
+    }
+    const copy = new Uint8Array(entry.bytes.byteLength);
+    copy.set(entry.bytes);
+    this.store.set(params.destinationKey, {
+      bytes: copy,
+      contentType: params.contentType || entry.contentType,
+    });
+    this.store.delete(params.sourceKey);
+    return { byteLength: copy.byteLength };
   }
 
   async deleteObject(storageKey: string): Promise<void> {

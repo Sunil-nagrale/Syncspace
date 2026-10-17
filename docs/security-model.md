@@ -153,10 +153,14 @@ When an Admin or Owner revokes a user's membership:
 
 SyncSpace enforces defense-in-depth for artifact file attachments across storage isolation, content validation, and per-request RBAC re-verification.
 
-### 7.1 Private Storage & Fail-Closed Production Policy
+### 7.1 Private Storage, Staging-to-Final Promotion & Fail-Closed Production Policy
 - **Private Bucket / Outside Web Root**: In production (`STORAGE_PROVIDER=s3`), objects are stored in a private S3-compatible bucket with public access blocked. In local development (`STORAGE_PROVIDER=local`), objects are stored in `.storage/attachments` outside the `public/` directory.
 - **Fail-Closed Production Startup**: If `NODE_ENV=production` and S3 credentials/bucket are missing, set to placeholders, or configured to use `local`/`memory`, the storage layer fails closed with `StorageConfigurationError` (`HTTP 503`).
-- **Unpredictable Object Keys**: Storage keys (`workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{uuid}-{hex}`) never incorporate user-supplied filenames, preventing path traversal and key guessing.
+- **Separate Staging & Final Object Keys**:
+  - Unverified uploads (`status = PENDING`) use a dedicated staging key: `workspaces/{workspaceId}/artifacts/{artifactId}/staging/{uuid}-{hex}`. Presigned upload URLs are issued exclusively for staging keys.
+  - Once `AttachmentService.completeUpload` verifies the staged object's byte length, magic-byte signature, active-content safety, and SHA-256 digest, the server promotes the object (`storage.promoteObject`) to a distinct final key: `workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{uuid}-{hex}`, removes the staging object, and atomically updates the database record to `status = READY` with the final key and SHA-256 checksum.
+  - Clients never receive upload URLs or storage keys for final `blobs/` objects, preventing an unexpired or reused upload authorization from overwriting a verified `READY` attachment.
+  - If the database transaction fails after storage promotion, the service removes the unreferenced promoted `blobs/` object and restores the `staging/` object so the upload remains `PENDING` and can be safely retried or cleaned up without leaving orphaned blobs.
 
 ### 7.2 File Format Allowlist, Size Limit & Signature Verification
 - **Maximum Size**: Strictly enforced at **10 MiB** (`10,485,760` bytes) on the server during both initiation and stored-object verification.
@@ -170,8 +174,9 @@ SyncSpace enforces defense-in-depth for artifact file attachments across storage
 - **Active Content & Executable Rejection**: Executable binaries (Windows PE `MZ`, Linux `ELF`, Mach-O), scripts (`.js`, `.sh`, `.ps1`, `.bat`), HTML (`.html`), and SVG (`.svg`) are strictly rejected even when disguised with an allowed extension or MIME type.
 - **Malware Scanning Limitation**: Built-in validation performs magic-byte signature verification, UTF-8 structural checks, and active-content pattern rejection, but **does not include an external antivirus/malware scanning engine** (such as ClamAV or cloud object scanning). Deployments handling untrusted external files should integrate asynchronous bucket malware scanning before promoting objects or restrict uploads to trusted workspace editors.
 
-### 7.3 Permission-Aware Downloads, Previews & Two-Phase Deletion
+### 7.3 Permission-Aware Downloads, Retrieval Checksum Verification & Two-Phase Deletion
 - **Every-Request Authorization**: Listing (`GET /api/artifacts/[artifactId]/attachments`) and downloading (`GET /api/artifacts/[artifactId]/attachments/[attachmentId]/download`) call `AuthorizationService.requireArtifactAccess(userId, artifactId, "VIEW")` on every request. Explicit `NONE` overrides, archived artifacts, and revoked workspace memberships take effect immediately.
+- **Retrieval-Time SHA-256 Integrity Verification**: Before serving any attachment with a stored `sha256` digest, `AttachmentService.getDownloadPayload` computes the SHA-256 hash of the retrieved bytes and compares it against `row.sha256`. On mismatch, the server blocks the download (`AttachmentIntegrityError`), transitions the attachment to `FAILED` (removing it from `READY` listings), and records an `ATTACHMENT_INTEGRITY_FAILED` audit event without exposing internal paths or storage keys.
 - **Safe Response Headers**: Downloads set `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store, max-age=0`, `Content-Security-Policy: default-src 'none'; ...; sandbox`, and RFC 5987 sanitized `Content-Disposition` headers.
 - **Deletion Policy & Cleanup**: Only the original uploader (while retaining `EDIT` access) or a workspace `OWNER`/`ADMIN` can delete an attachment. Deletion marks the record `DELETING` before removing the storage blob so storage errors never leave an attachment downloadable or falsely report success.
 
