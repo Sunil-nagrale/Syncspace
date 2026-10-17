@@ -7,12 +7,18 @@ import {
   NotFoundError,
 } from "@/services/authorization.service";
 import { SearchValidationError } from "@/lib/validations/search";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export async function GET(req: Request) {
   try {
     const session = await getServerSession();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const rateResult = checkRateLimit(`search:${session.user.id}`, 60, 60_000);
+    if (!rateResult.success) {
+      return rateLimitResponse(rateResult);
     }
 
     const { searchParams } = new URL(req.url);

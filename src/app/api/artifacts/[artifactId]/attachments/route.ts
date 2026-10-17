@@ -17,6 +17,7 @@ import {
   initiateAttachmentUploadSchema,
   listAttachmentsQuerySchema,
 } from "@/lib/validations/attachment";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 function handleAttachmentRouteError(err: unknown): NextResponse {
   if (err instanceof NotFoundError) {
@@ -105,6 +106,16 @@ export async function POST(
     }
 
     const { artifactId } = await params;
+
+    const rateResult = checkRateLimit(
+      `attachment-upload:${session.user.id}`,
+      30,
+      60_000
+    );
+    if (!rateResult.success) {
+      return rateLimitResponse(rateResult);
+    }
+
     const contentType = (req.headers.get("content-type") || "").toLowerCase();
 
     if (contentType.includes("multipart/form-data")) {

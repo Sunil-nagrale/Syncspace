@@ -6,6 +6,7 @@ import {
   NotFoundError,
 } from "@/services/authorization.service";
 import { mentionSuggestionsQuerySchema } from "@/lib/validations/notification";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export async function GET(
   req: Request,
@@ -15,6 +16,15 @@ export async function GET(
     const session = await getServerSession();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const rateResult = checkRateLimit(
+      `mentions:${session.user.id}`,
+      60,
+      60_000
+    );
+    if (!rateResult.success) {
+      return rateLimitResponse(rateResult);
     }
 
     const { artifactId } = await params;

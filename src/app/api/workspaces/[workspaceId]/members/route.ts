@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
+import { WorkspaceService } from "@/services/workspace.service";
 import {
   AuthorizationService,
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import { parseJsonBody } from "@/lib/security";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { WorkspaceRole } from "@prisma/client";
-
-const VALID_ROLES: WorkspaceRole[] = ["OWNER", "ADMIN", "EDITOR", "VIEWER"];
 
 export async function GET(
   _req: Request,
@@ -70,67 +71,31 @@ export async function POST(
     }
 
     const { workspaceId } = await params;
-    await AuthorizationService.requireWorkspaceAccess(
-      session.user.id,
-      workspaceId,
-      "ADMIN"
-    );
 
-    const body = await req.json();
-    const { userId, email, role } = body as {
+    const rateResult = checkRateLimit(
+      `members:${workspaceId}:${session.user.id}`,
+      30,
+      60_000
+    );
+    if (!rateResult.success) {
+      return rateLimitResponse(rateResult);
+    }
+
+    const bodyResult = await parseJsonBody<{
       userId?: string;
       email?: string;
       role?: WorkspaceRole;
-    };
+    }>(req);
 
-    const assignedRole: WorkspaceRole =
-      role && VALID_ROLES.includes(role) ? role : "VIEWER";
-
-    let targetUserId = userId;
-    if (!targetUserId && email) {
-      const targetUser = await prisma.user.findUnique({
-        where: { email },
-      });
-      if (!targetUser) {
-        return NextResponse.json({ error: "User not found" }, { status: 404 });
-      }
-      targetUserId = targetUser.id;
+    if (!bodyResult.success) {
+      return NextResponse.json({ error: bodyResult.error }, { status: 400 });
     }
 
-    if (!targetUserId) {
-      return NextResponse.json(
-        { error: "userId or email is required" },
-        { status: 400 }
-      );
-    }
-
-    const member = await prisma.workspaceMember.upsert({
-      where: {
-        workspaceId_userId: {
-          workspaceId,
-          userId: targetUserId,
-        },
-      },
-      update: {
-        role: assignedRole,
-      },
-      create: {
-        workspaceId,
-        userId: targetUserId,
-        role: assignedRole,
-      },
-    });
-
-    await prisma.activityEvent.create({
-      data: {
-        workspaceId,
-        userId: session.user.id,
-        action: "member.added",
-        entityType: "workspace_member",
-        entityId: member.id,
-        metadata: { targetUserId, role: assignedRole },
-      },
-    });
+    const member = await WorkspaceService.addMember(
+      session.user.id,
+      workspaceId,
+      bodyResult.data
+    );
 
     return NextResponse.json({ data: member }, { status: 201 });
   } catch (err: unknown) {

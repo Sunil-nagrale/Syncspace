@@ -5,6 +5,7 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import { parseJsonBody } from "@/lib/security";
 
 export async function GET(
   _req: Request,
@@ -50,11 +51,16 @@ export async function PUT(
     }
 
     const { artifactId } = await params;
-    const body = await req.json();
-    const { userId, role } = body as {
+    const bodyResult = await parseJsonBody<{
       userId?: string;
       role?: "EDITOR" | "VIEWER" | "NONE" | "INHERIT";
-    };
+    }>(req);
+
+    if (!bodyResult.success) {
+      return NextResponse.json({ error: bodyResult.error }, { status: 400 });
+    }
+
+    const { userId, role } = bodyResult.data;
 
     if (
       !userId ||

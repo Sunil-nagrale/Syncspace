@@ -251,6 +251,115 @@ export class WorkspaceService {
   }
 
   /**
+   * Add a member or update existing membership with strict role hierarchy checks.
+   * Enforces that non-owners cannot assign OWNER role,
+   * admins cannot assign ADMIN role,
+   * admins cannot modify owners or other admins,
+   * and operations execute in an atomic transaction with sanitized activity events.
+   */
+  static async addMember(
+    actorUserId: string,
+    workspaceId: string,
+    input: { userId?: string; email?: string; role?: WorkspaceRole }
+  ) {
+    const actorMembership = await AuthorizationService.requireWorkspaceAccess(
+      actorUserId,
+      workspaceId,
+      "ADMIN"
+    );
+
+    let targetUserId = input.userId;
+    if (!targetUserId && input.email) {
+      const email = input.email.trim().toLowerCase();
+      const targetUser = await prisma.user.findUnique({
+        where: { email },
+      });
+      if (!targetUser) {
+        throw new NotFoundError("User not found.");
+      }
+      targetUserId = targetUser.id;
+    }
+
+    if (!targetUserId) {
+      throw new Error("userId or email is required.");
+    }
+
+    const assignedRole: WorkspaceRole = input.role ?? "VIEWER";
+
+    // Rule: Non-owners cannot assign OWNER role
+    if (assignedRole === "OWNER" && actorMembership.role !== "OWNER") {
+      throw new AuthorizationError(
+        "Only workspace owners can assign the OWNER role.",
+        403
+      );
+    }
+
+    // Rule: ADMINs cannot assign ADMIN role. Only OWNER can assign ADMIN role.
+    if (actorMembership.role === "ADMIN" && assignedRole === "ADMIN") {
+      throw new AuthorizationError(
+        "Administrators cannot assign the ADMIN role. Only the workspace owner can assign administrators.",
+        403
+      );
+    }
+
+    // Check if user is already a member
+    const existingMember = await prisma.workspaceMember.findUnique({
+      where: {
+        workspaceId_userId: {
+          workspaceId,
+          userId: targetUserId,
+        },
+      },
+    });
+
+    if (existingMember) {
+      // Delegate to updateMemberRole to enforce all boundary conditions (e.g. last owner, admin on owner/admin)
+      return this.updateMemberRole(
+        actorUserId,
+        workspaceId,
+        existingMember.id,
+        assignedRole
+      );
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const created = await tx.workspaceMember.create({
+        data: {
+          workspaceId,
+          userId: targetUserId!,
+          role: assignedRole,
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              color: true,
+            },
+          },
+        },
+      });
+
+      await tx.activityEvent.create({
+        data: {
+          workspaceId,
+          userId: actorUserId,
+          action: "member.added",
+          entityType: "workspace_member",
+          entityId: created.id,
+          metadata: sanitizeActivityMetadata({
+            targetUserId,
+            role: assignedRole,
+          }),
+        },
+      });
+
+      return created;
+    });
+  }
+
+  /**
    * Update a member's role in the workspace.
    * Enforces role boundaries and protects against removing or demoting the last owner.
    */

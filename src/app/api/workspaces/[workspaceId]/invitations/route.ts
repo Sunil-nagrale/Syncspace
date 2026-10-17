@@ -5,6 +5,8 @@ import {
   AuthorizationError,
   NotFoundError,
 } from "@/services/authorization.service";
+import { parseJsonBody } from "@/lib/security";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { WorkspaceRole } from "@prisma/client";
 
 export async function GET(
@@ -51,10 +53,26 @@ export async function POST(
     }
 
     const { workspaceId } = await params;
-    const body = (await req.json()) as {
+
+    const rateResult = checkRateLimit(
+      `invitations:${workspaceId}:${session.user.id}`,
+      20,
+      60_000
+    );
+    if (!rateResult.success) {
+      return rateLimitResponse(rateResult);
+    }
+
+    const bodyResult = await parseJsonBody<{
       email?: string;
       role?: WorkspaceRole;
-    };
+    }>(req);
+
+    if (!bodyResult.success) {
+      return NextResponse.json({ error: bodyResult.error }, { status: 400 });
+    }
+
+    const body = bodyResult.data;
 
     if (!body?.email || typeof body.email !== "string") {
       return NextResponse.json(
