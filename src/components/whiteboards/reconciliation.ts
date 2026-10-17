@@ -225,14 +225,7 @@ export function reconcileElementPair(
     return local.version > remote.version ? local : remote;
   }
 
-  // When versions are identical, compare updated timestamp before tie-breaking nonce
-  const localUpdated = local.updated ?? 0;
-  const remoteUpdated = remote.updated ?? 0;
-  if (localUpdated !== remoteUpdated) {
-    return localUpdated > remoteUpdated ? local : remote;
-  }
-
-  // When versions and timestamps are identical, lower versionNonce wins (Excalidraw standard)
+  // When versions are identical, lower versionNonce wins (Excalidraw standard)
   return local.versionNonce <= remote.versionNonce ? local : remote;
 }
 
@@ -393,10 +386,10 @@ export function updateWhiteboardDomAttributes(
       active.map((el) => ({
         id: el.id,
         type: el.type,
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        width: Math.round(el.width),
-        height: Math.round(el.height),
+        x: el.x,
+        y: el.y,
+        width: el.width,
+        height: el.height,
       }))
     )
   );

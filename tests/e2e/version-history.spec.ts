@@ -17,10 +17,10 @@ function normalizeSceneElements(elements: ExcalidrawElementSnapshot[]): Excalidr
     .map((el) => ({
       id: el.id,
       type: el.type,
-      x: Math.round(el.x),
-      y: Math.round(el.y),
-      width: Math.round(el.width),
-      height: Math.round(el.height),
+      x: el.x,
+      y: el.y,
+      width: el.width,
+      height: el.height,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -479,7 +479,7 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     const startY = box.y + Math.floor(box.height * 0.3);
     await ownerPage.mouse.move(startX, startY);
     await ownerPage.mouse.down();
-    await ownerPage.mouse.move(startX + 140, startY + 90, { steps: 10 });
+    await ownerPage.mouse.move(startX + 140, startY + 90);
     await ownerPage.mouse.up();
 
     await expect(ownerPage.getByTestId("whiteboard-save-status")).toContainText("Saved", {
@@ -529,7 +529,7 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     const startY2 = box.y + Math.floor(box.height * 0.35);
     await ownerPage.mouse.move(startX2, startY2);
     await ownerPage.mouse.down();
-    await ownerPage.mouse.move(startX2 + 100, startY2 + 60, { steps: 5 });
+    await ownerPage.mouse.move(startX2 + 100, startY2 + 60);
     await ownerPage.mouse.up();
 
     await expect(ownerPage.getByTestId("whiteboard-save-status")).toContainText("Saved", {
@@ -661,8 +661,12 @@ test.describe("SyncSpace Phase 9A — Artifact Version History and Restore E2E",
     const startYC = boxCollab.y + Math.floor(boxCollab.height * 0.5);
     await collabPage.mouse.move(startXC, startYC);
     await collabPage.mouse.down();
-    await collabPage.mouse.move(startXC + 80, startYC + 50, { steps: 5 });
+    await collabPage.mouse.move(startXC + 80, startYC + 50);
     await collabPage.mouse.up();
+
+    await expect(collabPage.getByTestId("whiteboard-save-status")).toContainText("Saved", {
+      timeout: 15000,
+    });
 
     await expect
       .poll(async () => (await getActiveSceneElements(collabPage)).length, { timeout: 25000 })

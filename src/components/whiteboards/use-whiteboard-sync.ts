@@ -14,7 +14,7 @@ import {
   useStatus,
   useSelf,
 } from "@liveblocks/react";
-import type { LiveMap, JsonObject } from "@liveblocks/client";
+import { LiveMap, type JsonObject } from "@liveblocks/client";
 import type {
   CollaborativeWhiteboardProps,
   CollaboratorInfo,
@@ -140,7 +140,11 @@ export function useWhiteboardSync(
   // Liveblocks mutation to update changed elements in room storage
   const updateStorageElements = useMutation(
     ({ storage }, elementsToSync: readonly ExcalidrawElement[]) => {
-      const liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
+      let liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
+      if (!liveElements) {
+        liveElements = new LiveMap();
+        storage.set("elements", liveElements);
+      }
       applyMutatedElementsToStorageMap(liveElements, elementsToSync);
     },
     []
@@ -149,7 +153,11 @@ export function useWhiteboardSync(
   // Liveblocks mutation to apply restored whiteboard scene to storage
   const restoreStorageElements = useMutation(
     ({ storage }, elementsToRestore: readonly ExcalidrawElement[]) => {
-      const liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
+      let liveElements = storage.get("elements") as LiveMap<string, JsonObject> | undefined;
+      if (!liveElements) {
+        liveElements = new LiveMap();
+        storage.set("elements", liveElements);
+      }
       applyRestoredElementsToStorageMap(liveElements, elementsToRestore);
     },
     []
@@ -165,7 +173,8 @@ export function useWhiteboardSync(
       isApplyingRemoteUpdateRef.current = true;
       api.updateScene({ elements: restoredElements });
 
-      for (const el of restoredElements) {
+      const postRestoreElements = api.getSceneElementsIncludingDeleted();
+      for (const el of postRestoreElements) {
         lastSyncedVersionsRef.current.set(el.id, {
           version: el.version,
           versionNonce: el.versionNonce,
@@ -179,9 +188,9 @@ export function useWhiteboardSync(
         updateWhiteboardDomAttributes(container, restoredElements);
       }
 
-      setTimeout(() => {
+      queueMicrotask(() => {
         isApplyingRemoteUpdateRef.current = false;
-      }, 50);
+      });
 
       if (canEdit) {
         if (!elementsMap) {
@@ -225,7 +234,8 @@ export function useWhiteboardSync(
         isApplyingRemoteUpdateRef.current = true;
         api.updateScene({ elements: storageElements });
 
-        for (const el of storageElements) {
+        const postInitElements = api.getSceneElementsIncludingDeleted();
+        for (const el of postInitElements) {
           lastSyncedVersionsRef.current.set(el.id, {
             version: el.version,
             versionNonce: el.versionNonce,
@@ -239,9 +249,9 @@ export function useWhiteboardSync(
           updateWhiteboardDomAttributes(container, storageElements);
         }
 
-        setTimeout(() => {
+        queueMicrotask(() => {
           isApplyingRemoteUpdateRef.current = false;
-        }, 50);
+        });
       } else if (
         props.initialSnapshot?.elements &&
         props.initialSnapshot.elements.length > 0
@@ -251,7 +261,8 @@ export function useWhiteboardSync(
         isApplyingRemoteUpdateRef.current = true;
         api.updateScene({ elements: initialEls });
 
-        for (const el of initialEls) {
+        const postSnapshotElements = api.getSceneElementsIncludingDeleted();
+        for (const el of postSnapshotElements) {
           lastSyncedVersionsRef.current.set(el.id, {
             version: el.version,
             versionNonce: el.versionNonce,
@@ -266,7 +277,7 @@ export function useWhiteboardSync(
         }
 
         // If authorized editor, seed Liveblocks storage with the initial snapshot
-        if (canEdit && elementsMap !== null && elementsMap !== undefined) {
+        if (canEdit) {
           try {
             updateStorageElements(initialEls);
           } catch (err: unknown) {
@@ -274,9 +285,9 @@ export function useWhiteboardSync(
           }
         }
 
-        setTimeout(() => {
+        queueMicrotask(() => {
           isApplyingRemoteUpdateRef.current = false;
-        }, 50);
+        });
       } else {
         hasInitializedFromStorageRef.current = true;
       }
@@ -322,7 +333,8 @@ export function useWhiteboardSync(
     isApplyingRemoteUpdateRef.current = true;
     api.updateScene({ elements: reconciled });
 
-    for (const el of reconciled) {
+    const postReconcileElements = api.getSceneElementsIncludingDeleted();
+    for (const el of postReconcileElements) {
       lastSyncedVersionsRef.current.set(el.id, {
         version: el.version,
         versionNonce: el.versionNonce,
@@ -336,9 +348,9 @@ export function useWhiteboardSync(
       updateWhiteboardDomAttributes(container, reconciled);
     }
 
-    setTimeout(() => {
+    queueMicrotask(() => {
       isApplyingRemoteUpdateRef.current = false;
-    }, 50);
+    });
   }, [elementsMap, excalidrawAPIRef]);
 
   // Handle local Excalidraw canvas mutations and broadcast changed elements
@@ -360,28 +372,26 @@ export function useWhiteboardSync(
           (el.version === last.version && el.versionNonce !== last.versionNonce)
         ) {
           mutatedElements.push(el);
-          lastSyncedVersionsRef.current.set(el.id, {
-            version: el.version,
-            versionNonce: el.versionNonce,
-          });
         }
       }
 
       if (mutatedElements.length > 0) {
-        if (elementsMap !== null && elementsMap !== undefined) {
-          try {
-            updateStorageElements(mutatedElements);
-          } catch (err: unknown) {
-            console.error("Failed to update Liveblocks storage elements:", err);
-            setSaveState("error");
+        try {
+          updateStorageElements(mutatedElements);
+          for (const el of mutatedElements) {
+            lastSyncedVersionsRef.current.set(el.id, {
+              version: el.version,
+              versionNonce: el.versionNonce,
+            });
           }
-        } else {
-          console.warn("Liveblocks storage not available for real-time element mutation");
+        } catch (err: unknown) {
+          console.error("Failed to update Liveblocks storage elements:", err);
+          setSaveState("error");
         }
         schedulePostgresSnapshot(elements);
       }
     },
-    [canEdit, updateStorageElements, schedulePostgresSnapshot, elementsMap]
+    [canEdit, updateStorageElements, schedulePostgresSnapshot]
   );
 
   // Handle local pointer movements for ephemeral presence (laser / cursor)

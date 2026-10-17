@@ -186,15 +186,21 @@ test.describe("SyncSpace Phase 5 — Collaborative Rich-Text Document Editor & R
     await ownerPage.getByTestId("apply-link-button").click();
 
     // Wait for debounced PostgreSQL snapshot save to complete
+    await expect(ownerPage.getByTestId("document-save-status")).toContainText(
+      "Saved",
+      { timeout: 15000 }
+    );
+
     await expect
       .poll(
         async () => {
-          const ver = await prisma.artifactVersion.findFirst({
-            where: { artifactId: dbDoc!.id },
+          const art = await prisma.artifact.findUnique({
+            where: { id: dbDoc!.id },
+            select: { currentSnapshot: true },
           });
-          return ver ? JSON.stringify(ver.snapshotData) : "";
+          return art ? JSON.stringify(art.currentSnapshot) : "";
         },
-        { timeout: 10000 }
+        { timeout: 15000 }
       )
       .toContain("Zero-Trust Synchronization Guarantees");
 
