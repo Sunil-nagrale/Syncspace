@@ -35,8 +35,10 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000,
     env: {
-      // Explicit test-only environment markers allowing local Playwright to test against
-      // a local production build without requiring live AWS S3 or failing closed on missing cloud keys.
+      // Legitimate local test environment: runs under NODE_ENV="test" with test runner markers,
+      // allowing local tests to run against the production build with local storage and mock collaboration
+      // without weakening production runtime safety checks when NODE_ENV="production".
+      NODE_ENV: "test",
       SYNCSPACE_LOCAL_TEST_RUNNER: "true",
       SYNCSPACE_TEST_LOCAL_MODE: "true",
       ALLOW_LOCAL_STORAGE_IN_TEST: "true",

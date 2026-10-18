@@ -614,18 +614,31 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
         })
       ).toThrow(StorageConfigurationError);
 
-      // On a bare production deployment without a local test runner marker, test flags are ignored
+      // On a bare production host (unrecognized platform), even with BOTH runner markers and test flags,
+      // NODE_ENV=production strictly enforces production safeguards and rejects local storage
       expect(() =>
         resolveStorageProviderFromEnv({
           NODE_ENV: "production",
           STORAGE_PROVIDER: "local",
           SYNCSPACE_TEST_LOCAL_MODE: "true",
+          SYNCSPACE_LOCAL_TEST_RUNNER: "true",
+          PLAYWRIGHT: "1",
         })
       ).toThrow(StorageConfigurationError);
 
-      // Verified local test runner environment permits local storage for local E2E test runs
+      // On a bare production deployment with missing S3 config, it fails closed with StorageConfigurationError
+      expect(() =>
+        resolveStorageProviderFromEnv({
+          NODE_ENV: "production",
+          STORAGE_PROVIDER: "s3",
+          SYNCSPACE_TEST_LOCAL_MODE: "true",
+          SYNCSPACE_LOCAL_TEST_RUNNER: "true",
+        })
+      ).toThrow(StorageConfigurationError);
+
+      // Legitimate isolated local test runner environment (NODE_ENV="test") permits local storage
       const testLocalProvider = resolveStorageProviderFromEnv({
-        NODE_ENV: "production",
+        NODE_ENV: "test",
         STORAGE_PROVIDER: "local",
         NEXT_PUBLIC_APP_URL: "http://localhost:3000",
         BETTER_AUTH_URL: "http://localhost:3000",

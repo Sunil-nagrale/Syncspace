@@ -353,3 +353,23 @@ graph LR
   - **Comprehensive Regression Tests**:
     - Added tests in `tests/unit/health.test.ts` and `tests/unit/attachments.test.ts` proving that `NODE_ENV=production` plus `SYNCSPACE_TEST_LOCAL_MODE=true` in a production deployment (e.g. `VERCEL="1"`) cannot bypass production safeguards or authorize local filesystem storage.
     - Verified all 9 quality gates passed cleanly with zero warnings or errors.
+
+## Phase I.4.1: Harden Production Readiness Test Isolation (Completed & Verified)
+
+- **Deliverables**:
+  - **Closed Bare Server & Unrecognized Host Production Bypass**:
+    - Addressed the gap where `isProductionEnvironment()` previously returned `false` on unrecognized production hosts (such as self-hosted Docker, bare Linux VPS, or non-cloud servers) if test-runner markers and opt-in flags were accidentally configured alongside `NODE_ENV="production"`.
+    - Hardened `isProductionEnvironment(env)` in `src/lib/readiness.ts` so that `env.NODE_ENV === "production"` unconditionally enforces production safeguards across all hosts. Test-runner markers and test opt-in flags are strictly ignored when `NODE_ENV === "production"`.
+    - Hardened `isLocalTestEnvironment(env)` in `src/lib/readiness.ts` to strictly return `false` whenever `env.NODE_ENV === "production"`. Production is never a local test environment under any circumstances.
+  - **Preserved Local Playwright Testing via Isolated Test Harness**:
+    - Configured `playwright.config.ts` `webServer.env` with `NODE_ENV: "test"` alongside `SYNCSPACE_LOCAL_TEST_RUNNER: "true"` and `ALLOW_LOCAL_STORAGE_IN_TEST: "true"`.
+    - Enables local E2E tests to execute against the compiled production build with local filesystem storage and mock collaboration without weakening the production runtime check (`NODE_ENV === "production"`).
+  - **Comprehensive Regression Tests**:
+    - Added regression tests in `tests/unit/health.test.ts` proving:
+      1. `NODE_ENV=production` with both local-test flags and runner markers on a bare server strictly evaluates to production (`isProductionEnvironment: true`, `isLocalTestEnvironment: false`, health check reports 503 for missing Liveblocks).
+      2. `NODE_ENV=production` on recognized deployment platforms (Vercel, AWS) strictly evaluates to production.
+      3. Legitimate isolated local E2E test environment (`NODE_ENV="test"`) allows degraded/local test mode.
+      4. Missing production storage and Liveblocks configurations strictly fail closed.
+    - Added regression tests in `tests/unit/attachments.test.ts` proving `resolveStorageProviderFromEnv` rejects local storage on bare servers with `NODE_ENV=production` and test flags, and only permits local storage in legitimate test environments (`NODE_ENV="test"`).
+  - **All Quality Gates Verified**:
+    - Ran unit tests, PostgreSQL integration tests, ESLint, TypeScript check, Next.js production build, Playwright E2E suite, Prisma migrations, and production npm audit.

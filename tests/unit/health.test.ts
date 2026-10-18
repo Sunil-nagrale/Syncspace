@@ -219,8 +219,46 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
     expect(body.services.collaboration).toEqual({ status: "configured" });
   });
 
-  describe("Phase I.4 — Prevent Test Flags From Weakening Production", () => {
-    it("NODE_ENV=production plus SYNCSPACE_TEST_LOCAL_MODE=true cannot bypass production safeguards in a production deployment", async () => {
+  describe("Phase I.4.1 — Harden Production Readiness Test Isolation", () => {
+    it("NODE_ENV=production with both local-test flags and runner markers on a bare server strictly remains production", async () => {
+      vi.spyOn(prisma, "$queryRaw").mockResolvedValueOnce([{ healthy: 1 }] as any);
+      const mockStorage = new InMemoryStorageProvider();
+      await mockStorage.putObject({
+        storageKey: HEALTH_CHECK_PROBE_KEY,
+        bytes: new Uint8Array([1]),
+        contentType: "text/plain",
+      });
+      setStorageProviderForTests(mockStorage);
+
+      delete process.env.LIVEBLOCKS_SECRET_KEY;
+      delete process.env.SYNCSPACE_STRICT_PRODUCTION;
+      delete process.env.VERCEL;
+      delete process.env.VERCEL_ENV;
+      delete process.env.AWS_EXECUTION_ENV;
+      vi.stubEnv("NODE_ENV", "production");
+
+      // Bare server (no platform env vars) where test flags and runner markers were accidentally configured
+      process.env.SYNCSPACE_LOCAL_TEST_RUNNER = "true";
+      process.env.PLAYWRIGHT = "1";
+      process.env.SYNCSPACE_TEST_LOCAL_MODE = "true";
+      process.env.ALLOW_LOCAL_STORAGE_IN_TEST = "true";
+      process.env.NEXT_PUBLIC_APP_URL = "http://192.168.1.100:3000";
+
+      expect(isDeployedPlatform(process.env)).toBe(false);
+      expect(isLocalTestEnvironment(process.env)).toBe(false);
+      expect(isProductionEnvironment(process.env)).toBe(true);
+
+      // Readiness health check MUST report HTTP 503 unhealthy in production when Liveblocks is unconfigured
+      const bareResponse = await GET();
+      expect(bareResponse.status).toBe(503);
+      const bareBody = await bareResponse.json();
+      expect(bareBody.status).toBe("unhealthy");
+      expect(bareBody.services.collaboration.status).toBe("unconfigured");
+      expect(bareBody.services.database.status).toBe("up");
+      expect(bareBody.services.storage.status).toBe("ready");
+    });
+
+    it("NODE_ENV=production with both local-test flags and runner markers on recognized deployment platforms strictly remains production", async () => {
       vi.spyOn(prisma, "$queryRaw").mockResolvedValueOnce([{ healthy: 1 }] as any);
       const mockStorage = new InMemoryStorageProvider();
       await mockStorage.putObject({
@@ -233,10 +271,12 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       delete process.env.LIVEBLOCKS_SECRET_KEY;
       delete process.env.SYNCSPACE_STRICT_PRODUCTION;
       vi.stubEnv("NODE_ENV", "production");
+      process.env.SYNCSPACE_LOCAL_TEST_RUNNER = "true";
+      process.env.PLAYWRIGHT = "1";
       process.env.SYNCSPACE_TEST_LOCAL_MODE = "true";
       process.env.NEXT_PUBLIC_APP_URL = "https://syncspace.dev";
 
-      // 1. On Vercel (primary deployment target)
+      // 1. On Vercel
       process.env.VERCEL = "1";
       process.env.VERCEL_ENV = "production";
       expect(isDeployedPlatform(process.env)).toBe(true);
@@ -254,22 +294,12 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       delete process.env.VERCEL_ENV;
       process.env.AWS_EXECUTION_ENV = "AWS_ECS_FARGATE";
       expect(isDeployedPlatform(process.env)).toBe(true);
+      expect(isLocalTestEnvironment(process.env)).toBe(false);
       expect(isProductionEnvironment(process.env)).toBe(true);
 
       vi.spyOn(prisma, "$queryRaw").mockResolvedValueOnce([{ healthy: 1 }] as any);
       const awsResponse = await GET();
       expect(awsResponse.status).toBe(503);
-
-      // 3. On bare production server without local test runner marker
-      delete process.env.AWS_EXECUTION_ENV;
-      delete process.env.SYNCSPACE_LOCAL_TEST_RUNNER;
-      delete process.env.PLAYWRIGHT;
-      expect(
-        isProductionEnvironment({
-          NODE_ENV: "production",
-          SYNCSPACE_TEST_LOCAL_MODE: "true",
-        })
-      ).toBe(true);
     });
 
     it("NODE_ENV=production plus localhost URLs remains production", async () => {
@@ -311,7 +341,7 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       expect(body.services.collaboration.status).toBe("unconfigured");
     });
 
-    it("local Playwright configuration can still run its intended mocked/local-storage tests", async () => {
+    it("a legitimate isolated local E2E test environment (NODE_ENV=test) allows degraded/local test mode", async () => {
       vi.spyOn(prisma, "$queryRaw").mockResolvedValueOnce([{ healthy: 1 }] as any);
       const mockStorage = new InMemoryStorageProvider();
       await mockStorage.putObject({
@@ -324,14 +354,18 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       delete process.env.LIVEBLOCKS_SECRET_KEY;
       delete process.env.VERCEL;
       delete process.env.VERCEL_ENV;
-      vi.stubEnv("NODE_ENV", "production");
+      delete process.env.AWS_EXECUTION_ENV;
+      delete process.env.SYNCSPACE_STRICT_PRODUCTION;
+
+      // Legitimate isolated local test harness
+      vi.stubEnv("NODE_ENV", "test");
+      process.env.SYNCSPACE_LOCAL_TEST_RUNNER = "true";
+      process.env.PLAYWRIGHT = "1";
+      process.env.SYNCSPACE_TEST_LOCAL_MODE = "true";
       process.env.NEXT_PUBLIC_APP_URL = "http://localhost:3000";
       process.env.BETTER_AUTH_URL = "http://localhost:3000";
 
-      // Verified local test runner environment
-      process.env.SYNCSPACE_LOCAL_TEST_RUNNER = "true";
-      process.env.SYNCSPACE_TEST_LOCAL_MODE = "true";
-
+      expect(isDeployedPlatform(process.env)).toBe(false);
       expect(isLocalTestEnvironment(process.env)).toBe(true);
       expect(isProductionEnvironment(process.env)).toBe(false);
 
@@ -423,9 +457,10 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       expect(isDeployedPlatform({ FLY_APP_NAME: "syncspace-app" })).toBe(true);
       expect(isDeployedPlatform({})).toBe(false);
 
-      // Local test environment requires both runner marker and opt-in flag, and no deployment platform
+      // Local test environment requires both runner marker and opt-in flag in non-production mode, and no deployment platform
       expect(
         isLocalTestEnvironment({
+          NODE_ENV: "test",
           SYNCSPACE_LOCAL_TEST_RUNNER: "true",
           SYNCSPACE_TEST_LOCAL_MODE: "true",
         })
@@ -433,14 +468,26 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
 
       expect(
         isLocalTestEnvironment({
+          NODE_ENV: "test",
           PLAYWRIGHT: "1",
           ALLOW_LOCAL_STORAGE_IN_TEST: "true",
         })
       ).toBe(true);
 
+      // Bare production host (NODE_ENV=production) can NEVER be a local test environment
+      expect(
+        isLocalTestEnvironment({
+          NODE_ENV: "production",
+          SYNCSPACE_LOCAL_TEST_RUNNER: "true",
+          SYNCSPACE_TEST_LOCAL_MODE: "true",
+          PLAYWRIGHT: "1",
+        })
+      ).toBe(false);
+
       // Deployed platforms can never be local test environments
       expect(
         isLocalTestEnvironment({
+          NODE_ENV: "test",
           VERCEL: "1",
           SYNCSPACE_LOCAL_TEST_RUNNER: "true",
           SYNCSPACE_TEST_LOCAL_MODE: "true",
@@ -450,6 +497,7 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       // Missing runner marker fails
       expect(
         isLocalTestEnvironment({
+          NODE_ENV: "test",
           SYNCSPACE_TEST_LOCAL_MODE: "true",
         })
       ).toBe(false);
@@ -457,6 +505,7 @@ describe("Phase I.2 — Production Readiness Health Check API (/api/health)", ()
       // Missing opt-in flag fails
       expect(
         isLocalTestEnvironment({
+          NODE_ENV: "test",
           SYNCSPACE_LOCAL_TEST_RUNNER: "true",
         })
       ).toBe(false);
