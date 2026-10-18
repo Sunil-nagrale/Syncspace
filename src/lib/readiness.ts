@@ -6,33 +6,104 @@
  * CONTRACT & RULES:
  * 1. Default to Production:
  *    - `NODE_ENV === "production"` is treated as production by default.
- * 2. Never Weaken Production Based on URLs:
+ * 2. Unconditional Production on Deployed Platforms:
+ *    - If running on Vercel or any managed cloud deployment platform, production safeguards
+ *      are strictly enforced regardless of any test flags or URL configurations.
+ * 3. Never Weaken Production Based on URLs:
  *    - Application URLs pointing to localhost (`NEXT_PUBLIC_APP_URL`, `BETTER_AUTH_URL`)
  *      must NEVER cause the application to infer non-production mode or permit insecure fallbacks.
- * 3. Strict Production Override:
+ * 4. Strict Production Override:
  *    - `SYNCSPACE_STRICT_PRODUCTION === "true"` unconditionally enforces production mode.
- * 4. Explicit Test-Only Opt-In:
- *    - `SYNCSPACE_TEST_LOCAL_MODE === "true"` (aliasing `ALLOW_LOCAL_STORAGE_IN_TEST === "true"`)
- *      allows local test runners (e.g. Playwright testing a local production build via `npm run start`)
- *      to permit local disk storage or degraded collaboration status when external services are unconfigured.
- *    - This flag is strictly ignored if `SYNCSPACE_STRICT_PRODUCTION === "true"`.
- *    - In real production deployments, this flag must never be configured.
+ * 5. Local Test Overrides Restricted to Verified Local Test Environments:
+ *    - A test override is ONLY accepted if `isLocalTestEnvironment(env)` is true (i.e.
+ *      running locally under Playwright or Vitest, not deployed to any cloud platform,
+ *      with both an explicit local test runner marker and test opt-in flag).
+ *    - In real production deployments, test flags cannot bypass production safeguards or S3 storage.
  */
 
+/**
+ * Detects whether the current environment is running on a managed cloud deployment platform.
+ *
+ * Platforms recognized:
+ * - Vercel (primary recommended deployment target): VERCEL === "1", VERCEL_ENV
+ * - AWS (ECS, Lambda, Amplify): AWS_EXECUTION_ENV, AWS_LAMBDA_FUNCTION_NAME
+ * - Cloud container platforms: RENDER, FLY_APP_NAME, RAILWAY_ENVIRONMENT, DYNO (Heroku),
+ *   KUBERNETES_SERVICE_HOST, NETLIFY
+ */
+export function isDeployedPlatform(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return Boolean(
+    env.VERCEL === "1" ||
+      env.VERCEL_ENV === "production" ||
+      env.VERCEL_ENV === "preview" ||
+      env.AWS_EXECUTION_ENV ||
+      env.AWS_LAMBDA_FUNCTION_NAME ||
+      env.RENDER === "true" ||
+      env.FLY_APP_NAME ||
+      env.RAILWAY_ENVIRONMENT ||
+      env.DYNO ||
+      env.KUBERNETES_SERVICE_HOST ||
+      env.NETLIFY === "true"
+  );
+}
+
+/**
+ * Detects whether the current environment is a verified, isolated local test runner.
+ *
+ * Test overrides are only permissible when running under a recognized local test harness
+ * (Playwright E2E or Vitest unit/integration tests) and NEVER on a deployed platform.
+ */
+export function isLocalTestEnvironment(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  // Deployed cloud platforms are NEVER local test environments
+  if (isDeployedPlatform(env)) {
+    return false;
+  }
+
+  // Explicit strict production overrides any test environment claims
+  if (env.SYNCSPACE_STRICT_PRODUCTION === "true") {
+    return false;
+  }
+
+  const hasTestRunnerMarker = Boolean(
+    env.SYNCSPACE_LOCAL_TEST_RUNNER === "true" ||
+      env.PLAYWRIGHT === "1" ||
+      env.PLAYWRIGHT_TEST === "1" ||
+      env.VITEST === "true" ||
+      env.NODE_ENV === "test"
+  );
+
+  const hasTestOptInFlag = Boolean(
+    env.SYNCSPACE_TEST_LOCAL_MODE === "true" ||
+      env.ALLOW_LOCAL_STORAGE_IN_TEST === "true"
+  );
+
+  return hasTestRunnerMarker && hasTestOptInFlag;
+}
+
+/**
+ * Evaluates whether the application is operating under strict production readiness requirements.
+ */
 export function isProductionEnvironment(
   env: Record<string, string | undefined> = process.env
 ): boolean {
+  // 1. Strict production flag unconditionally enforces production
   if (env.SYNCSPACE_STRICT_PRODUCTION === "true") {
     return true;
   }
 
-  const isExplicitTestOptIn =
-    env.SYNCSPACE_TEST_LOCAL_MODE === "true" ||
-    env.ALLOW_LOCAL_STORAGE_IN_TEST === "true";
+  // 2. Any deployed platform unconditionally enforces production safeguards
+  if (isDeployedPlatform(env)) {
+    return true;
+  }
 
-  if (isExplicitTestOptIn) {
+  // 3. Verified local test runners testing a production build can operate in degraded/local test mode
+  if (isLocalTestEnvironment(env)) {
     return false;
   }
 
+  // 4. Default: NODE_ENV === "production" is strictly production
   return env.NODE_ENV === "production";
 }

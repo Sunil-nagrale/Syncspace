@@ -603,12 +603,33 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
         })
       ).toThrow(StorageConfigurationError);
 
-      // Explicit test opt-in flag permits local storage for local E2E test runs
+      // On a deployed platform (e.g. Vercel), test flags CANNOT authorize local storage
+      expect(() =>
+        resolveStorageProviderFromEnv({
+          NODE_ENV: "production",
+          STORAGE_PROVIDER: "local",
+          VERCEL: "1",
+          SYNCSPACE_TEST_LOCAL_MODE: "true",
+          SYNCSPACE_LOCAL_TEST_RUNNER: "true",
+        })
+      ).toThrow(StorageConfigurationError);
+
+      // On a bare production deployment without a local test runner marker, test flags are ignored
+      expect(() =>
+        resolveStorageProviderFromEnv({
+          NODE_ENV: "production",
+          STORAGE_PROVIDER: "local",
+          SYNCSPACE_TEST_LOCAL_MODE: "true",
+        })
+      ).toThrow(StorageConfigurationError);
+
+      // Verified local test runner environment permits local storage for local E2E test runs
       const testLocalProvider = resolveStorageProviderFromEnv({
         NODE_ENV: "production",
         STORAGE_PROVIDER: "local",
         NEXT_PUBLIC_APP_URL: "http://localhost:3000",
         BETTER_AUTH_URL: "http://localhost:3000",
+        SYNCSPACE_LOCAL_TEST_RUNNER: "true",
         SYNCSPACE_TEST_LOCAL_MODE: "true",
       });
       expect(testLocalProvider).toBeInstanceOf(LocalFileStorageProvider);
@@ -619,6 +640,7 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
         resolveStorageProviderFromEnv({
           NODE_ENV: "production",
           STORAGE_PROVIDER: "local",
+          SYNCSPACE_LOCAL_TEST_RUNNER: "true",
           SYNCSPACE_TEST_LOCAL_MODE: "true",
           SYNCSPACE_STRICT_PRODUCTION: "true",
         })

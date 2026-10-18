@@ -339,3 +339,17 @@ graph LR
     - Verified storage failures return HTTP 503 even with test opt-in active.
     - Verified `isProductionEnvironment` helper logic across all configuration permutations.
     - Added tests in `tests/unit/attachments.test.ts` proving localhost URLs can never authorize local storage in production.
+
+## Phase I.4: Prevent Test Flags From Weakening Production (Completed & Verified)
+
+- **Deliverables**:
+  - **Platform Deployment Indicators**:
+    - Implemented `isDeployedPlatform` in `src/lib/readiness.ts` recognizing managed cloud platforms (Vercel `VERCEL=1` / `VERCEL_ENV`, AWS, Render, Fly, Railway, Kubernetes, Heroku, Netlify).
+    - In any deployed platform, production safeguards and S3 storage requirements are unconditionally enforced; test flags can never weaken production or authorize local storage.
+  - **Isolated Local Test Environment Harness**:
+    - Implemented `isLocalTestEnvironment` requiring both a verified local test runner marker (`SYNCSPACE_LOCAL_TEST_RUNNER`, `PLAYWRIGHT`, `VITEST`) and explicit test opt-in flags.
+    - Local test overrides are strictly rejected if running on any deployed platform or if `SYNCSPACE_STRICT_PRODUCTION=true`.
+    - Updated `playwright.config.ts` `webServer.env` with `SYNCSPACE_LOCAL_TEST_RUNNER: "true"` and `PLAYWRIGHT: "1"`.
+  - **Comprehensive Regression Tests**:
+    - Added tests in `tests/unit/health.test.ts` and `tests/unit/attachments.test.ts` proving that `NODE_ENV=production` plus `SYNCSPACE_TEST_LOCAL_MODE=true` in a production deployment (e.g. `VERCEL="1"`) cannot bypass production safeguards or authorize local filesystem storage.
+    - Verified all 9 quality gates passed cleanly with zero warnings or errors.

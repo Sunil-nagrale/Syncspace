@@ -229,7 +229,8 @@ This stack is recommended because Next.js 15 App Router runs natively on Vercel 
 
 ### 5. Production Readiness & Security Enforcement
 - **Strict Production Mode:** `NODE_ENV === "production"` is treated as production by default. Localhost URLs (`NEXT_PUBLIC_APP_URL`, `BETTER_AUTH_URL`) never weaken production enforcement or silently authorize local file storage. Missing required production dependencies (database, S3, or Liveblocks) strictly fail closed with HTTP 503.
-- **Local Test Opt-In (`SYNCSPACE_TEST_LOCAL_MODE`):** Used exclusively by local test runners (e.g. Playwright testing against a local production build via `npm run start`) to permit degraded mock mode without requiring live external cloud services. In real production deployments, this variable must never be configured. Setting `SYNCSPACE_STRICT_PRODUCTION=true` unconditionally forbids test overrides.
+- **Platform Deployment Indicators:** On managed cloud platforms (such as Vercel via `VERCEL=1` / `VERCEL_ENV`, AWS, Render, Fly, Railway), production safeguards and S3 storage requirements are enforced unconditionally. Test flags are strictly ignored in deployed environments.
+- **Isolated Local Test Harness:** Local test overrides (`SYNCSPACE_TEST_LOCAL_MODE=true` / `ALLOW_LOCAL_STORAGE_IN_TEST=true`) are only accepted when running in a verified local test environment (Playwright or Vitest with `SYNCSPACE_LOCAL_TEST_RUNNER=true` or `PLAYWRIGHT=1`) and never on any deployed platform. Setting `SYNCSPACE_STRICT_PRODUCTION=true` unconditionally overrides all test flags.
 
 ### 6. Rollback Procedure
 - **Application Rollback:** In Vercel, select the previous stable deployment and click **Promote to Production** for instant zero-downtime rollback.
