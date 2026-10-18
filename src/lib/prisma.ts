@@ -8,7 +8,17 @@ const globalForPrisma = globalThis as unknown as {
   pool: Pool | undefined;
 };
 
-function getDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * Resolves the database connection string for application runtime queries.
+ *
+ * ARCHITECTURAL CONTRACT:
+ * - Application runtime strictly uses `DATABASE_URL` (the connection-pooled endpoint, e.g. Neon connection pooler).
+ * - `DIRECT_URL` is reserved EXCLUSIVELY for Prisma CLI schema migrations and status checks in `prisma.config.ts`.
+ *   Runtime queries must NEVER use `DIRECT_URL`, as serverless traffic requires pooled connection management.
+ */
+export function getDatabaseUrl(
+  env: Record<string, string | undefined> = process.env
+): string {
   if (env.DATABASE_URL) {
     return env.DATABASE_URL;
   }

@@ -373,3 +373,37 @@ graph LR
     - Added regression tests in `tests/unit/attachments.test.ts` proving `resolveStorageProviderFromEnv` rejects local storage on bare servers with `NODE_ENV=production` and test flags, and only permits local storage in legitimate test environments (`NODE_ENV="test"`).
   - **All Quality Gates Verified**:
     - Ran unit tests, PostgreSQL integration tests, ESLint, TypeScript check, Next.js production build, Playwright E2E suite, Prisma migrations, and production npm audit.
+
+---
+
+## Phase J.1.1: Separate Runtime and Migration Database Connections (Completed & Verified)
+
+- **Deliverables**:
+  - **Prisma CLI Migration URL Precedence (`prisma.config.ts`)**:
+    - Implemented `getPrismaCliDatabaseUrl(env, options)` in `prisma.config.ts` to prioritize `DIRECT_URL` (direct unpooled PostgreSQL connection required for schema DDL and table locks in serverless setups such as Neon or Supabase).
+    - Automatically falls back to `DATABASE_URL` when `DIRECT_URL` is omitted, preserving local development and single-connection setups.
+    - Gracefully handles client generation (`prisma generate` / `NEXT_PHASE=phase-production-build`) with a safe placeholder string to allow zero-credential build steps.
+    - Strictly fails closed with `[Security Configuration Error]` in production environments (`NODE_ENV === "production"`, `VERCEL === "1"`, `SYNCSPACE_STRICT_PRODUCTION === "true"`, etc.) if database configuration is missing, preventing schema migrations from accidentally targeting a localhost database.
+    - Safely rejects placeholder connection strings (`changeme`, `placeholder`, `example`, `your-`).
+  - **Application Runtime Isolation (`src/lib/prisma.ts`)**:
+    - Exported and documented `getDatabaseUrl` to strictly consume `DATABASE_URL` (the connection-pooled endpoint managed by `pg.Pool`).
+    - Enforced architectural separation: application runtime traffic never uses `DIRECT_URL`, preventing connection pool exhaustion in serverless/autoscaling deployments.
+    - Preserved production fail-fast enforcement when `DATABASE_URL` is missing during production runtime.
+  - **Configuration & Documentation Updates**:
+    - Updated `.env.example` documenting `DATABASE_URL` (pooled runtime) and `DIRECT_URL` (direct migration).
+    - Updated `README.md` with `DIRECT_URL` in the environment inventory and deployment runbook.
+  - **Unit Regression Suite (`tests/unit/database-url.test.ts`)**:
+    - 13 comprehensive unit tests covering:
+      1. `getPrismaCliDatabaseUrl` preferring `DIRECT_URL` over `DATABASE_URL`.
+      2. Trimming whitespace from `DIRECT_URL`.
+      3. Falling back to `DATABASE_URL` when `DIRECT_URL` is absent, empty, or whitespace.
+      4. Ignoring placeholder `DIRECT_URL` and falling back to valid `DATABASE_URL`.
+      5. Failing closed in production across multiple platform markers when no database URL is set.
+      6. Failing closed in production when both URLs are placeholders.
+      7. Permitting safe dummy generation during client generation and Next.js build phase.
+      8. Defaulting to local Docker PostgreSQL connection in development.
+      9. `getDatabaseUrl` strictly using `DATABASE_URL` and never falling back to `DIRECT_URL`.
+      10. `getDatabaseUrl` failing fast in production when `DATABASE_URL` is missing.
+      11. `getDatabaseUrl` allowing harmless placeholder fallback during build phase.
+  - **Verification**:
+    - All 13 tests passed cleanly in `tests/unit/database-url.test.ts`.

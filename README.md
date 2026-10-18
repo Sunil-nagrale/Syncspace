@@ -54,7 +54,8 @@ SyncSpace is a production-grade fullstack collaborative platform built with Next
 
 | Variable | Purpose | Status | Required In | Build Time vs Runtime | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `DATABASE_URL` | PostgreSQL connection string | **Required** | All | Runtime | Use connection pooler URL in production with `?sslmode=require` |
+| `DATABASE_URL` | PostgreSQL connection string (pooled) | **Required** | All | Runtime | Use connection pooler URL in production with `?sslmode=require` |
+| `DIRECT_URL` | PostgreSQL direct connection string (unpooled) | Optional | Production / Staging | Prisma CLI | Direct unpooled URL for migrations; bypasses pooler to execute DDL safely |
 | `BETTER_AUTH_SECRET` | 32+ char key for session encryption | **Required** | Production | Runtime | Never required at build time. Build generates ephemeral in-memory keys |
 | `BETTER_AUTH_URL` | Canonical application base URL | **Required** | Production | Runtime | E.g. `https://syncspace.dev` |
 | `NEXT_PUBLIC_APP_URL`| Public client base URL | **Required** | All | Build & Runtime | E.g. `https://syncspace.dev` or `http://localhost:3000` |
@@ -136,11 +137,14 @@ This stack is recommended because Next.js 15 App Router runs natively on Vercel 
 
 ### 1. Database Provisioning (Neon / Supabase)
 1. Create a PostgreSQL 16 database instance.
-2. Retrieve the pooled connection string (with `?sslmode=require`).
-3. Run migrations against the production database:
+2. Retrieve both connection strings:
+   - **Pooled connection string (`DATABASE_URL`)**: Connection pooler endpoint (e.g. Neon connection pooler or PgBouncer with `?sslmode=require`) used exclusively for runtime application traffic.
+   - **Direct unpooled connection string (`DIRECT_URL`)**: Direct endpoint (e.g. Neon unpooled direct connection with `?sslmode=require`) used exclusively by Prisma CLI for schema migrations and status checks.
+3. Run migrations against the database using `DIRECT_URL`:
    ```bash
-   DATABASE_URL="postgresql://...pooler...?sslmode=require" npx prisma migrate deploy
+   DIRECT_URL="postgresql://...direct...?sslmode=require" npx prisma migrate deploy
    ```
+   *(Note: `prisma.config.ts` automatically prioritizes `DIRECT_URL` over `DATABASE_URL` for CLI commands, falling back to `DATABASE_URL` if `DIRECT_URL` is omitted).*
 
 ### 2. Private Object Storage Provisioning (AWS S3 / Cloudflare R2)
 1. Create a dedicated private S3 bucket: `syncspace-attachments-prod`.
