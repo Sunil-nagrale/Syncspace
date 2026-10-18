@@ -34,5 +34,11 @@ export default defineConfig({
     url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000,
+    env: {
+      // Explicit test-only opt-in flags allowing Playwright to test against a local production build
+      // without requiring live AWS S3 or failing closed when optional local test services are mocked.
+      SYNCSPACE_TEST_LOCAL_MODE: "true",
+      ALLOW_LOCAL_STORAGE_IN_TEST: "true",
+    },
   },
 });

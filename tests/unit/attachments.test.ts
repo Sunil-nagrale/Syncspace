@@ -592,6 +592,37 @@ describe("Phase 9B Unit Tests — File Attachment Validation & Security", () => 
       });
       expect(prodProvider).toBeInstanceOf(S3StorageProvider);
       expect(prodProvider.providerName).toBe("s3");
+
+      // Localhost URLs do NOT bypass production mode or permit local storage
+      expect(() =>
+        resolveStorageProviderFromEnv({
+          NODE_ENV: "production",
+          STORAGE_PROVIDER: "local",
+          NEXT_PUBLIC_APP_URL: "http://localhost:3000",
+          BETTER_AUTH_URL: "http://localhost:3000",
+        })
+      ).toThrow(StorageConfigurationError);
+
+      // Explicit test opt-in flag permits local storage for local E2E test runs
+      const testLocalProvider = resolveStorageProviderFromEnv({
+        NODE_ENV: "production",
+        STORAGE_PROVIDER: "local",
+        NEXT_PUBLIC_APP_URL: "http://localhost:3000",
+        BETTER_AUTH_URL: "http://localhost:3000",
+        SYNCSPACE_TEST_LOCAL_MODE: "true",
+      });
+      expect(testLocalProvider).toBeInstanceOf(LocalFileStorageProvider);
+      expect(testLocalProvider.providerName).toBe("local");
+
+      // Strict production overrides test opt-in and enforces S3
+      expect(() =>
+        resolveStorageProviderFromEnv({
+          NODE_ENV: "production",
+          STORAGE_PROVIDER: "local",
+          SYNCSPACE_TEST_LOCAL_MODE: "true",
+          SYNCSPACE_STRICT_PRODUCTION: "true",
+        })
+      ).toThrow(StorageConfigurationError);
     });
   });
 });

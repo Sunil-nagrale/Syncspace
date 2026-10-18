@@ -227,13 +227,17 @@ This stack is recommended because Next.js 15 App Router runs natively on Vercel 
 3. Deploy. Vercel automatically runs `npm run build`.
 4. Verify deployment health at `https://your-production-domain.com/api/health`.
 
-### 5. Rollback Procedure
+### 5. Production Readiness & Security Enforcement
+- **Strict Production Mode:** `NODE_ENV === "production"` is treated as production by default. Localhost URLs (`NEXT_PUBLIC_APP_URL`, `BETTER_AUTH_URL`) never weaken production enforcement or silently authorize local file storage. Missing required production dependencies (database, S3, or Liveblocks) strictly fail closed with HTTP 503.
+- **Local Test Opt-In (`SYNCSPACE_TEST_LOCAL_MODE`):** Used exclusively by local test runners (e.g. Playwright testing against a local production build via `npm run start`) to permit degraded mock mode without requiring live external cloud services. In real production deployments, this variable must never be configured. Setting `SYNCSPACE_STRICT_PRODUCTION=true` unconditionally forbids test overrides.
+
+### 6. Rollback Procedure
 - **Application Rollback:** In Vercel, select the previous stable deployment and click **Promote to Production** for instant zero-downtime rollback.
 - **Database Schema Rollback:** Schema migrations in `prisma/migrations/` are strictly additive and backward-compatible. If an emergency schema revert is needed, generate a migration down-script and apply via `npx prisma migrate deploy`.
 
 ---
 
-## 6. Testing & Quality Verification
+## 7. Testing & Quality Verification
 
 SyncSpace enforces 8 quality gates across the entire application stack:
 

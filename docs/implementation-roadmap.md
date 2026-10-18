@@ -321,3 +321,21 @@ graph LR
   - **Clarified Health Status & Sanitization**:
     - Updated Liveblocks health status to `collaboration.status: "configured"` | `"unconfigured"` to accurately describe configuration status without falsely claiming network connectivity.
     - Fully preserved response sanitization: zero leakage of provider names, credentials, bucket names, connection strings, or internal exception messages.
+
+## Phase I.3: Enforce Explicit Production Readiness (Completed & Verified)
+
+- **Deliverables**:
+  - **Explicit Production Classification**:
+    - Updated `/api/health` and `resolveStorageProviderFromEnv` to treat `NODE_ENV === "production"` as production by default.
+    - Completely removed localhost URL checks (`NEXT_PUBLIC_APP_URL` and `BETTER_AUTH_URL`) that previously downgraded production to development mode.
+    - Production deployments with localhost URLs (e.g. behind local proxies or misconfigured URLs) strictly enforce S3 storage and Liveblocks readiness (failing closed with HTTP 503 if missing).
+  - **Isolated Local Test Opt-In (`SYNCSPACE_TEST_LOCAL_MODE`)**:
+    - Introduced explicit test-only opt-in flag (`SYNCSPACE_TEST_LOCAL_MODE === "true"`, aliasing `ALLOW_LOCAL_STORAGE_IN_TEST`) allowing local E2E test runners (Playwright testing a local production build) to operate with local storage and degraded mock mode without live cloud services.
+    - Guarded against accidental production leakage: `SYNCSPACE_STRICT_PRODUCTION === "true"` unconditionally overrides test flags.
+    - Added `webServer.env` configuration in `playwright.config.ts`.
+  - **Regression Tests**:
+    - Added tests in `tests/unit/health.test.ts` proving `NODE_ENV=production` with localhost URLs returns HTTP 503 when Liveblocks is missing.
+    - Verified `SYNCSPACE_TEST_LOCAL_MODE` permits degraded HTTP 200 mode in local test runs.
+    - Verified storage failures return HTTP 503 even with test opt-in active.
+    - Verified `isProductionEnvironment` helper logic across all configuration permutations.
+    - Added tests in `tests/unit/attachments.test.ts` proving localhost URLs can never authorize local storage in production.

@@ -8,6 +8,7 @@ import {
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { isProductionEnvironment } from "@/lib/readiness";
 
 export class StorageError extends Error {
   constructor(
@@ -1008,13 +1009,15 @@ export async function checkStorageConnectivity(
 export function resolveStorageProviderFromEnv(
   env: Record<string, string | undefined> = process.env
 ): StorageProvider {
-  const isLocalhostServer =
-    env.ALLOW_LOCAL_STORAGE_IN_TEST === "true" ||
-    (Boolean(env.NEXT_PUBLIC_APP_URL?.startsWith("http://localhost:")) &&
-      Boolean(env.BETTER_AUTH_URL?.startsWith("http://localhost:")) &&
-      env.SYNCSPACE_STRICT_PRODUCTION !== "true");
+  // Production mode detection:
+  // - NODE_ENV === "production" is treated as production by default.
+  // - Never infer that an environment is non-production merely because URLs point to localhost.
+  // - In strict production (SYNCSPACE_STRICT_PRODUCTION === "true"), production S3 is mandatory.
+  // - An explicit test-only opt-in flag (SYNCSPACE_TEST_LOCAL_MODE === "true" or
+  //   ALLOW_LOCAL_STORAGE_IN_TEST === "true") allows local test runners to use local storage
+  //   when testing a production build, provided SYNCSPACE_STRICT_PRODUCTION is not "true".
+  const isProduction = isProductionEnvironment(env);
 
-  const isProduction = env.NODE_ENV === "production" && !isLocalhostServer;
   const requestedProvider = (env.STORAGE_PROVIDER || "").trim().toLowerCase();
 
   if (isProduction) {

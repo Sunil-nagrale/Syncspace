@@ -6,6 +6,7 @@ import {
   StorageConfigurationError,
 } from "@/lib/storage";
 import { isLiveblocksSecretKeyConfigured } from "@/services/liveblocks-auth.service";
+import { isProductionEnvironment } from "@/lib/readiness";
 
 export const dynamic = "force-dynamic";
 
@@ -42,11 +43,7 @@ export const dynamic = "force-dynamic";
  *   connection strings, bucket names, credentials, internal provider names, or environment labels.
  */
 export async function GET() {
-  const isProduction =
-    process.env.SYNCSPACE_STRICT_PRODUCTION === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      !process.env.NEXT_PUBLIC_APP_URL?.startsWith("http://localhost:") &&
-      !process.env.BETTER_AUTH_URL?.startsWith("http://localhost:"));
+  const isProduction = isProductionEnvironment();
 
   // 1. Database readiness check
   let dbStatus: "up" | "down" = "down";
