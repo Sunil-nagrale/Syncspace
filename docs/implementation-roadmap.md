@@ -435,3 +435,29 @@ graph LR
       8. Credential-free client generation during builds.
   - **Verification**:
     - 25/25 unit tests passed cleanly in `tests/unit/database-url.test.ts`.
+
+---
+
+## Phase J.1.3: Make Prisma Client-Generation Detection Exact (Completed & Verified)
+
+- **Deliverables**:
+  - **Exact Command Token Detection (`src/lib/database-url.ts`)**:
+    - Implemented `isPrismaGenerateCommand(argv)` to parse command-line arguments and detect the exact `generate` subcommand token.
+    - Slices off runtime executable (`node.exe`/`bun`) and script path (`.../prisma/build/index.js`), completely eliminating false positives where directory paths contain `generate` (e.g. `D:/projects/generate-app/...`).
+    - Distinguishes exact command tokens (`generate`) from argument substrings (e.g. `--schema=./schemas/generate/schema.prisma`, `--generate-key`, `--name generate`).
+    - Explicitly excludes database commands (`migrate`, `db`) from client-generation classification.
+    - Re-exported `isPrismaGenerateCommand` in `prisma.config.ts`.
+  - **getPrismaCliDatabaseUrl Integration**:
+    - Replaced overly broad `process.argv.some(arg => arg.includes("generate"))` with `isPrismaGenerateCommand(options?.argv ?? process.argv)`.
+    - Preserved explicit `isClientGeneration` test overrides and `NEXT_PHASE === "phase-production-build"` behavior.
+  - **Unit Regression Suite (`tests/unit/database-url.test.ts`)**:
+    - Expanded from 25 to 40 unit tests verifying:
+      1. Identification of standard `generate` invocations and flag combinations.
+      2. Rejection of filesystem paths containing `generate` during `migrate deploy` and `migrate status`.
+      3. Rejection of option values containing `generate` (e.g. `--schema=.../generate/...`, `--generate-key`, `--name generate`).
+      4. Safe generation URL returned for real Prisma generate commands.
+      5. Strict fail-closed production migration checks when directory or schema paths contain `generate`.
+      6. Rejection of missing, placeholder, or loopback database URLs during migrations regardless of argument contents.
+      7. Continued support for local development with local Docker PostgreSQL.
+  - **Verification**:
+    - All 40 unit tests passed cleanly in `tests/unit/database-url.test.ts`.

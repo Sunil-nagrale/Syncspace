@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { getPrismaCliDatabaseUrl } from "../../prisma.config";
+import {
+  getPrismaCliDatabaseUrl,
+  isPrismaGenerateCommand,
+} from "../../prisma.config";
 import { getDatabaseUrl } from "@/lib/prisma";
 import {
   extractDatabaseHostname,
@@ -448,6 +451,296 @@ describe("Phase J.1 — Database Connection URL Separation and Production Harden
             NEXT_PHASE: "phase-production-build",
           })
         ).toBe(
+          "postgresql://postgres:postgres@localhost:5432/syncspace?schema=public"
+        );
+      });
+    });
+  });
+
+  describe("Phase J.1.3 — Make Prisma Client-Generation Detection Exact", () => {
+    describe("1. Exact Prisma Command Token Detection (isPrismaGenerateCommand)", () => {
+      it("correctly identifies standard Prisma generate commands", () => {
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "C:/syncspace/node_modules/prisma/build/index.js",
+            "generate",
+          ])
+        ).toBe(true);
+
+        expect(
+          isPrismaGenerateCommand([
+            "C:/Program Files/nodejs/node.exe",
+            "C:/syncspace/node_modules/prisma/build/index.js",
+            "--schema=./prisma/schema.prisma",
+            "generate",
+          ])
+        ).toBe(true);
+
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "index.js",
+            "generate",
+            "--watch",
+          ])
+        ).toBe(true);
+
+        expect(isPrismaGenerateCommand(["generate"])).toBe(true);
+        expect(isPrismaGenerateCommand(["--schema=schema.prisma", "generate"])).toBe(true);
+      });
+
+      it("rejects CLI invocations where generate is merely a substring in a directory path", () => {
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "D:/projects/generate-app/node_modules/prisma/build/index.js",
+            "migrate",
+            "deploy",
+          ])
+        ).toBe(false);
+
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "C:/Users/generate_user/syncspace/prisma/build/index.js",
+            "migrate",
+            "status",
+          ])
+        ).toBe(false);
+      });
+
+      it("rejects CLI invocations where generate is a substring in an argument or option value", () => {
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "index.js",
+            "migrate",
+            "deploy",
+            "--schema=./schemas/generate/schema.prisma",
+          ])
+        ).toBe(false);
+
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "index.js",
+            "migrate",
+            "deploy",
+            "--generate-key",
+          ])
+        ).toBe(false);
+
+        expect(
+          isPrismaGenerateCommand([
+            "node.exe",
+            "index.js",
+            "migrate",
+            "dev",
+            "--name",
+            "generate",
+          ])
+        ).toBe(false);
+      });
+
+      it("rejects other Prisma subcommands even when generate-like words are absent", () => {
+        expect(isPrismaGenerateCommand(["node.exe", "index.js", "migrate", "deploy"])).toBe(false);
+        expect(isPrismaGenerateCommand(["node.exe", "index.js", "migrate", "status"])).toBe(false);
+        expect(isPrismaGenerateCommand(["node.exe", "index.js", "db", "push"])).toBe(false);
+        expect(isPrismaGenerateCommand(["node.exe", "index.js", "db", "pull"])).toBe(false);
+        expect(isPrismaGenerateCommand(["node.exe", "index.js", "studio"])).toBe(false);
+        expect(isPrismaGenerateCommand(["node.exe", "index.js"])).toBe(false);
+        expect(isPrismaGenerateCommand([])).toBe(false);
+      });
+    });
+
+    describe("2. getPrismaCliDatabaseUrl Exact Client-Generation Classification", () => {
+      it("uses the safe generation URL when actual Prisma generate command is invoked", () => {
+        const url = getPrismaCliDatabaseUrl(
+          { NODE_ENV: "production" },
+          {
+            argv: [
+              "node.exe",
+              "C:/syncspace/node_modules/prisma/build/index.js",
+              "generate",
+            ],
+          }
+        );
+
+        expect(url).toBe(
+          "postgresql://placeholder:placeholder@localhost:5432/placeholder"
+        );
+      });
+
+      it("uses the safe generation URL when generate has leading options", () => {
+        const url = getPrismaCliDatabaseUrl(
+          { NODE_ENV: "production" },
+          {
+            argv: [
+              "node.exe",
+              "index.js",
+              "--schema=./prisma/schema.prisma",
+              "generate",
+            ],
+          }
+        );
+
+        expect(url).toBe(
+          "postgresql://placeholder:placeholder@localhost:5432/placeholder"
+        );
+      });
+
+      it("preserves explicit isClientGeneration: true and build phase overrides", () => {
+        const explicitUrl = getPrismaCliDatabaseUrl(
+          { NODE_ENV: "production" },
+          { isClientGeneration: true }
+        );
+        expect(explicitUrl).toContain("placeholder");
+
+        const buildPhaseUrl = getPrismaCliDatabaseUrl({
+          NODE_ENV: "production",
+          NEXT_PHASE: "phase-production-build",
+        });
+        expect(buildPhaseUrl).toContain("placeholder");
+      });
+
+      it("honors explicit isClientGeneration: false to force production validation", () => {
+        expect(() =>
+          getPrismaCliDatabaseUrl(
+            { NODE_ENV: "production" },
+            {
+              isClientGeneration: false,
+              argv: ["node.exe", "index.js", "generate"],
+            }
+          )
+        ).toThrow("[Security Configuration Error]");
+      });
+    });
+
+    describe("3. Production Migration Fail-Closed Isolation", () => {
+      it("does not bypass production migration checks when directory path contains generate", () => {
+        expect(() =>
+          getPrismaCliDatabaseUrl(
+            { NODE_ENV: "production" },
+            {
+              argv: [
+                "node.exe",
+                "D:/code/generate-services/syncspace/node_modules/prisma/build/index.js",
+                "migrate",
+                "deploy",
+              ],
+            }
+          )
+        ).toThrow(
+          "[Security Configuration Error] Missing required database configuration for migrations in production. Specify DIRECT_URL or DATABASE_URL."
+        );
+      });
+
+      it("does not bypass production migration checks when schema path contains generate", () => {
+        expect(() =>
+          getPrismaCliDatabaseUrl(
+            { NODE_ENV: "production" },
+            {
+              argv: [
+                "node.exe",
+                "index.js",
+                "migrate",
+                "deploy",
+                "--schema=./schemas/generate/schema.prisma",
+              ],
+            }
+          )
+        ).toThrow("[Security Configuration Error]");
+      });
+
+      it("rejects placeholder database URLs during production migrations even if path contains generate", () => {
+        expect(() =>
+          getPrismaCliDatabaseUrl(
+            {
+              NODE_ENV: "production",
+              DIRECT_URL: envExampleSampleUrl,
+            },
+            {
+              argv: [
+                "node.exe",
+                "D:/generate/index.js",
+                "migrate",
+                "deploy",
+              ],
+            }
+          )
+        ).toThrow("[Security Configuration Error]");
+      });
+
+      it("rejects loopback database URLs during production migrations even if path contains generate", () => {
+        expect(() =>
+          getPrismaCliDatabaseUrl(
+            {
+              NODE_ENV: "production",
+              DIRECT_URL: "postgresql://prod_admin:secret_password@localhost:5432/syncspace",
+            },
+            {
+              argv: [
+                "node.exe",
+                "D:/generate/index.js",
+                "migrate",
+                "deploy",
+              ],
+            }
+          )
+        ).toThrow(
+          "[Security Configuration Error] Insecure DIRECT_URL detected in production. Loopback and local addresses are not permitted in production environments."
+        );
+      });
+
+      it("resolves valid staging URLs during production migrations when path contains generate", () => {
+        const url = getPrismaCliDatabaseUrl(
+          {
+            NODE_ENV: "production",
+            DIRECT_URL: dummyDirectUrl,
+            DATABASE_URL: dummyPooledUrl,
+          },
+          {
+            argv: [
+              "node.exe",
+              "D:/generate/index.js",
+              "migrate",
+              "deploy",
+            ],
+          }
+        );
+
+        expect(url).toBe(dummyDirectUrl);
+      });
+    });
+
+    describe("4. Preserving Local Development Database Behavior", () => {
+      it("preserves local PostgreSQL resolution during development migration commands", () => {
+        const localDockerUrl =
+          "postgresql://postgres:postgres@localhost:5432/syncspace?schema=public";
+
+        const url = getPrismaCliDatabaseUrl(
+          {
+            NODE_ENV: "development",
+            DATABASE_URL: localDockerUrl,
+          },
+          {
+            argv: ["node.exe", "index.js", "migrate", "deploy"],
+          }
+        );
+
+        expect(url).toBe(localDockerUrl);
+      });
+
+      it("defaults to local Docker connection when database URLs are omitted in development", () => {
+        const url = getPrismaCliDatabaseUrl(
+          { NODE_ENV: "development" },
+          {
+            argv: ["node.exe", "index.js", "migrate", "deploy"],
+          }
+        );
+
+        expect(url).toBe(
           "postgresql://postgres:postgres@localhost:5432/syncspace?schema=public"
         );
       });

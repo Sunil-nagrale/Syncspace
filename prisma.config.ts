@@ -1,8 +1,11 @@
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
-import { getPrismaCliDatabaseUrl } from "./src/lib/database-url";
+import {
+  getPrismaCliDatabaseUrl,
+  isPrismaGenerateCommand,
+} from "./src/lib/database-url";
 
-export { getPrismaCliDatabaseUrl };
+export { getPrismaCliDatabaseUrl, isPrismaGenerateCommand };
 
 export default defineConfig({
   schema: "prisma/schema.prisma",

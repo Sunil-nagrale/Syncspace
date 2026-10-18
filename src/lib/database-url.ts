@@ -107,6 +107,40 @@ export function validateProductionDatabaseUrl(
 }
 
 /**
+ * Detects whether the current CLI invocation is an actual Prisma `generate` command.
+ *
+ * Requirements:
+ * - Slices off executable and script paths to avoid false positives on directory paths containing 'generate'.
+ * - Checks for the exact 'generate' command token.
+ * - Ensures database migration commands ('migrate', 'db') are not misclassified as generation commands.
+ */
+export function isPrismaGenerateCommand(
+  argv: string[] = process.argv ?? []
+): boolean {
+  if (!Array.isArray(argv) || argv.length === 0) return false;
+
+  // If full process.argv (>= 2 elements starting with node or script), slice off runtime and script
+  const isFullProcessArgv =
+    argv.length >= 2 &&
+    (/(^|[/\\])(node|bun)(\.exe)?$/i.test(argv[0]) ||
+      /\.(js|ts|mjs|cjs)$/i.test(argv[1]));
+
+  const cliArgs = isFullProcessArgv ? argv.slice(2) : argv;
+
+  const hasExactGenerate = cliArgs.some((arg) => arg === "generate");
+  const hasDbOrMigrateCommand = cliArgs.some(
+    (arg) => arg === "migrate" || arg === "db"
+  );
+
+  return hasExactGenerate && !hasDbOrMigrateCommand;
+}
+
+export interface PrismaCliOptions {
+  isClientGeneration?: boolean;
+  argv?: string[];
+}
+
+/**
  * Resolves the database connection string for Prisma CLI operations (migrations, status, client generation).
  *
  * PRECEDENCE & SECURITY CONTRACT:
@@ -123,12 +157,12 @@ export function validateProductionDatabaseUrl(
  */
 export function getPrismaCliDatabaseUrl(
   env: Record<string, string | undefined> = process.env,
-  options?: { isClientGeneration?: boolean }
+  options?: PrismaCliOptions
 ): string {
   // 1. Client generation does not need a live database
   const isGenerate =
     options?.isClientGeneration ??
-    (Boolean(process.argv?.some((arg) => arg.includes("generate"))) ||
+    (isPrismaGenerateCommand(options?.argv ?? process.argv) ||
       env.NEXT_PHASE === "phase-production-build");
 
   if (isGenerate) {
