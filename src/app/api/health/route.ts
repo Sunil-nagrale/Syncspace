@@ -17,9 +17,16 @@ export const dynamic = "force-dynamic";
  * CONTRACT & SEMANTICS:
  * - Readiness check: Evaluates whether the application is fully ready to accept and process traffic.
  * - Dependencies evaluated:
- *   1. Relational Database (PostgreSQL via Prisma SELECT 1)
- *   2. Object Storage (Active provider configuration & non-destructive connectivity probe)
- *   3. Real-Time Collaboration (Liveblocks credentials validation)
+ *   1. Relational Database: PostgreSQL connection and query readiness via Prisma `SELECT 1`.
+ *   2. Object Storage: Active provider configuration and deterministic read probe on the
+ *      provisioned health-marker object (`workspaces/health/artifacts/probe/blobs/marker`).
+ *      Validates bucket connectivity, authentication, and read capability under least-privilege
+ *      IAM policies without requiring broad `s3:ListBucket` permissions. Note: This probe
+ *      verifies storage connectivity and read accessibility; it does not perform write/upload
+ *      operations on health requests (full upload/download capabilities are validated via E2E test suites).
+ *   3. Real-Time Collaboration: Validates configuration status of the Liveblocks secret key.
+ *      Accurately reports configuration readiness ("configured" vs "unconfigured") without
+ *      falsely claiming external WebSocket reachability.
  *
  * RESPONSE CODES:
  * - 200 OK:
@@ -68,10 +75,10 @@ export async function GET() {
     }
   }
 
-  // 3. Real-time collaboration readiness check
+  // 3. Real-time collaboration configuration check
   const liveblocksConfigured = isLiveblocksSecretKeyConfigured();
-  const collaborationStatus: "ready" | "unconfigured" = liveblocksConfigured
-    ? "ready"
+  const collaborationStatus: "configured" | "unconfigured" = liveblocksConfigured
+    ? "configured"
     : "unconfigured";
 
   // Evaluate readiness status and HTTP status code
@@ -80,14 +87,14 @@ export async function GET() {
 
   const isDbReady = dbStatus === "up";
   const isStorageReady = storageStatus === "ready";
-  const isCollabReady = collaborationStatus === "ready";
+  const isCollabConfigured = collaborationStatus === "configured";
 
   if (!isDbReady || !isStorageReady) {
     overallStatus = "unhealthy";
     httpStatusCode = 503;
-  } else if (!isCollabReady) {
+  } else if (!isCollabConfigured) {
     if (isProduction) {
-      // Liveblocks is a required dependency in production
+      // Liveblocks configuration is required in production
       overallStatus = "unhealthy";
       httpStatusCode = 503;
     } else {

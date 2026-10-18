@@ -162,29 +162,50 @@ This stack is recommended because Next.js 15 App Router runs natively on Vercel 
      }
    ]
    ```
-5. **Configure Staging Lifecycle Rules:**
-   SyncSpace stores attachment objects using the key layout:
+5. **Staging Upload Lifecycle & Abandoned Object Cleanup:**
+   SyncSpace stages uploads using the structured key layout:
    - Staging uploads: `workspaces/{workspaceId}/artifacts/{artifactId}/staging/{uploadId}`
    - Promoted blobs: `workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{blobId}`
 
-   *Important*: Amazon S3 Lifecycle rule prefixes only support literal string prefixes; wildcards (`*`) or regex expressions are treated as literal characters and will not match dynamic path segments.
-   To expire uncompleted staging uploads matching the key layout:
-   - **Recommended Lifecycle Filter by Object Tag:** Configure an S3 Lifecycle rule targeting objects with the tag `status=staging` (or `lifecycle=staging`) to expire after 1 day.
-   - **Automated Cleaner Function:** Alternatively, deploy an AWS Lambda scheduled via EventBridge cron to periodically sweep and delete abandoned objects under `/staging/` prefixes older than 24 hours.
-   - **Dedicated Staging Bucket (Alternative):** In environments requiring prefix-only expiration rules, route staged uploads to a dedicated staging bucket with a root lifecycle rule.
-6. **IAM Policy:** Grant an IAM user access strictly to the bucket:
+   When uploads succeed, the backend promotes the verified bytes to the final `blobs/` key and immediately deletes the staging object. However, if an upload is initiated but abandoned before completion (e.g. browser tab closed mid-upload), the staging object remains in storage.
+
+   *Important*: Amazon S3 Lifecycle rule prefixes only support literal leading string prefixes; wildcards or regex patterns are treated as literal characters and cannot match intermediate path segments. Because browser presigned uploads do not attach tags:
+   - Abandoned staging uploads are **not** automatically cleaned up by bucket-level S3 lifecycle rules.
+   - **Recommended Operational Solution (Scheduled Cleaner):** Configure an AWS EventBridge rule to invoke a periodic cleanup script or AWS Lambda once daily to sweep and delete objects containing `/staging/` older than 24 hours.
+   - **Alternative Solution (Dedicated Staging Bucket):** In environments requiring native S3 lifecycle rules without custom cleaner functions, route temporary staging uploads to a dedicated staging bucket with a standard 1-day bucket-wide expiration rule.
+
+6. **Health Check Marker Object Provisioning:**
+   SyncSpace's production readiness probe (`GET /api/health`) verifies storage connectivity using a deterministic read check on a known health-marker key (`workspaces/health/artifacts/probe/blobs/marker`).
+   This allows the probe to operate under least-privilege IAM permissions: the application only requires `s3:GetObject` on object keys, without granting broad bucket listing (`s3:ListBucket`).
+
+   To provision the initial marker object during bucket setup:
+   ```bash
+   aws s3api put-object \
+     --bucket syncspace-attachments-prod \
+     --key workspaces/health/artifacts/probe/blobs/marker \
+     --body - <<< "syncspace-health-marker"
+   ```
+   Or upload a small file named `marker` into `workspaces/health/artifacts/probe/blobs/` via the AWS S3 Console.
+
+7. **IAM Policy:** Grant an IAM user least-privilege access strictly to the bucket objects:
    ```json
    {
      "Version": "2012-10-17",
      "Statement": [
        {
+         "Sid": "SyncSpaceObjectAccess",
          "Effect": "Allow",
-         "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+         "Action": [
+           "s3:PutObject",
+           "s3:GetObject",
+           "s3:DeleteObject"
+         ],
          "Resource": "arn:aws:s3:::syncspace-attachments-prod/*"
        }
      ]
    }
    ```
+   *Security Note*: With the provisioned health marker in place, the application only requires `s3:GetObject` to confirm connectivity via `HeadObject`. No broad `s3:ListBucket` permission is granted or required.
 
 ### 3. Liveblocks Setup
 1. Create a project at [Liveblocks Dashboard](https://liveblocks.io).

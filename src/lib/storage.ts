@@ -100,7 +100,7 @@ const SAFE_STORAGE_KEY_PATTERN =
   /^workspaces\/[a-zA-Z0-9_-]+\/artifacts\/[a-zA-Z0-9_-]+\/(?:staging|blobs)\/[a-zA-Z0-9_-]+$/;
 
 export const HEALTH_CHECK_PROBE_KEY =
-  "workspaces/health/artifacts/probe/blobs/check";
+  "workspaces/health/artifacts/probe/blobs/marker";
 
 /**
  * Validates that a storageKey adheres strictly to the generated internal key format
@@ -509,7 +509,12 @@ export class S3StorageProvider implements StorageProvider {
           timeoutMs
         );
       });
-      await Promise.race([probePromise, timeoutPromise]);
+      const meta = await Promise.race([probePromise, timeoutPromise]);
+      // The probe marker object MUST exist and be readable. If it does not exist (404),
+      // or if access was denied (403), readiness probe cannot verify storage capability.
+      if (!meta.exists) {
+        return { reachable: false };
+      }
       return { reachable: true, latencyMs: Date.now() - start };
     } catch {
       return { reachable: false };
@@ -714,6 +719,14 @@ export class LocalFileStorageProvider implements StorageProvider {
       await fs.access(this.rootDir).catch(async () => {
         await fs.mkdir(this.rootDir, { recursive: true });
       });
+      const { blobPath } = this.resolveObjectPaths(HEALTH_CHECK_PROBE_KEY);
+      const dir = path.dirname(blobPath);
+      await fs.mkdir(dir, { recursive: true });
+      try {
+        await fs.access(blobPath);
+      } catch {
+        await fs.writeFile(blobPath, "syncspace-health-marker\n", "utf-8");
+      }
       return { reachable: true, latencyMs: Date.now() - start };
     } catch {
       return { reachable: false };
@@ -928,6 +941,10 @@ export class InMemoryStorageProvider implements StorageProvider {
     if (this.failNextHead || this.failNextGet) {
       return { reachable: false };
     }
+    const entry = this.store.get(HEALTH_CHECK_PROBE_KEY);
+    if (!entry) {
+      return { reachable: false };
+    }
     return { reachable: true, latencyMs: 0 };
   }
 }
@@ -972,7 +989,10 @@ export async function checkStorageConnectivity(
         timeoutMs
       );
     });
-    await Promise.race([probePromise, timeoutPromise]);
+    const meta = await Promise.race([probePromise, timeoutPromise]);
+    if (!meta.exists) {
+      return { reachable: false };
+    }
     return { reachable: true, latencyMs: Date.now() - start };
   } catch {
     return { reachable: false };

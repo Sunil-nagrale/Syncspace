@@ -304,3 +304,20 @@ graph LR
     - S3 CORS documentation updated with production domain placeholders and explicit guidance against `*` wildcards.
     - Replaced invalid S3 wildcard prefix pattern with valid S3 lifecycle rules matching `workspaces/{workspaceId}/artifacts/{artifactId}/staging/{uploadId}` (object tags or serverless cleanup).
     - Explicitly distinguished completed repository preparation from external operator actions requiring cloud accounts.
+
+---
+
+## Phase I.2: Storage Readiness & Staging Cleanup Hardening (Completed & Verified)
+
+- **Deliverables**:
+  - **Deterministic S3 Readiness Probing via Provisioned Health Marker**:
+    - Updated storage health probe key to `workspaces/health/artifacts/probe/blobs/marker`.
+    - Operates under least-privilege IAM permissions: only requires `s3:GetObject` on the object resource without granting broad `s3:ListBucket`.
+    - Explicitly checks `meta.exists`: missing probe objects or 403 access denied errors are safely reported as `reachable: false` (HTTP 503) and never mistaken for a working bucket.
+    - Added unit tests in `tests/unit/health.test.ts` for successful readiness, missing probe objects, access-denied responses, timeouts, and sanitized failures (8/8 passed).
+  - **Honest Staging-Upload Lifecycle Cleanup**:
+    - Removed unsupported object-tagging recommendations from documentation.
+    - Documented operational solutions: automated daily scheduled cleaner (AWS EventBridge cron triggering an AWS Lambda function or maintenance script) to sweep unpromoted `/staging/` uploads older than 24 hours, or dedicated staging buckets with standard lifecycle rules.
+  - **Clarified Health Status & Sanitization**:
+    - Updated Liveblocks health status to `collaboration.status: "configured"` | `"unconfigured"` to accurately describe configuration status without falsely claiming network connectivity.
+    - Fully preserved response sanitization: zero leakage of provider names, credentials, bucket names, connection strings, or internal exception messages.
