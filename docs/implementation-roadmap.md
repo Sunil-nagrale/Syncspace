@@ -407,3 +407,31 @@ graph LR
       11. `getDatabaseUrl` allowing harmless placeholder fallback during build phase.
   - **Verification**:
     - All 13 tests passed cleanly in `tests/unit/database-url.test.ts`.
+
+---
+
+## Phase J.1.2: Reject Example and Localhost Database URLs in Production (Completed & Verified)
+
+- **Deliverables**:
+  - **Shared Database URL Validation (`src/lib/database-url.ts`)**:
+    - Created `extractDatabaseHostname` extracting hostname across standard URIs, bracketed IPv6 addresses (`[::1]`), and fallback regex for special characters.
+    - Implemented `isLoopbackHost` identifying `localhost`, `*.localhost`, IPv4 loopback (`127.0.0.1`, `127.0.0.0/8`), IPv6 loopback (`::1`, `[::1]`), and unspecified bindings (`0.0.0.0`, `::`).
+    - Implemented `isTemplateOrPlaceholderUrl` detecting template credential pairs (`user:password`, `username:password`, `user:pass`) and token keywords (`placeholder`, `example`, `changeme`, `your-`, `dummy`, `sample`).
+    - Implemented `validateProductionDatabaseUrl(url, varName)` strictly rejecting template credentials, example URLs, loopback addresses, or empty values in production.
+    - Sanitized error output: error messages strictly report `[Security Configuration Error]` with generic descriptions and NEVER include passwords, connection strings, or hostnames.
+  - **Prisma CLI & Runtime Integration**:
+    - Refactored `prisma.config.ts` and `src/lib/prisma.ts` to delegate to `src/lib/database-url.ts`.
+    - `getPrismaCliDatabaseUrl`: strictly rejects the `.env.example` sample URL and loopback hosts for production migrations, while preserving `DIRECT_URL` preference, `DATABASE_URL` fallback, and credential-free client generation.
+    - `getDatabaseUrl`: strictly rejects template credentials and loopback hosts for production runtime, while preserving local development with local PostgreSQL and Next.js build-phase fallback.
+  - **Unit Regression Suite (`tests/unit/database-url.test.ts`)**:
+    - 25 automated unit tests verifying:
+      1. Accurate hostname extraction and loopback detection.
+      2. Rejection of the exact `.env.example` sample URL for production migrations (`DIRECT_URL` or `DATABASE_URL`).
+      3. Rejection of localhost, 127.0.0.1, 127.0.0.2, [::1], and 0.0.0.0 for production migrations.
+      4. Complete sanitization of error messages (no credentials, hosts, or connection strings).
+      5. Rejection of the `.env.example` sample URL, loopback hosts, and template credentials in production runtime.
+      6. Successful resolution of valid non-loopback staging URLs.
+      7. Continued acceptance of local PostgreSQL URLs in local development.
+      8. Credential-free client generation during builds.
+  - **Verification**:
+    - 25/25 unit tests passed cleanly in `tests/unit/database-url.test.ts`.
