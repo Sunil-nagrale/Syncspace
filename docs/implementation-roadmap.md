@@ -277,7 +277,7 @@ graph LR
     - Database operational scripts added to `package.json` (`npm run migrate:deploy`, `npm run db:status`, `npm run db:generate`).
   - **UI & Accessibility Polish**:
     - Landing page (`/`) updated with dedicated Architecture section (`#architecture`), resolving navigation anchors for `#preview`, `#features`, and `#architecture`.
-    - Login page (`/login`) cleaned up with production-ready empty state, clean placeholders, and one-click demo credentials autofill helper.
+    - Login page (`/login`) cleaned up with production-ready empty state and clean placeholders.
     - Keyboard-accessible search (`Cmd+K`/`Ctrl+K`), responsive sidebar collapse, and theme switching across dark/light modes.
   - **Comprehensive Production Documentation**:
     - Root `README.md` created covering product overview, architecture diagram, environment variable inventory, local development setup, database migration procedures, production deployment guide (Vercel + Neon + S3 + Liveblocks), rollback strategy, quality gates, operational limitations, and safe demo checklist.
@@ -286,3 +286,21 @@ graph LR
   - Zero layout shift, responsive mobile navigation, and accessible keyboard focus rings.
   - Production build completes cleanly with zero errors and 55 routes compiled and optimized.
 - **Definition of Done**: Complete, polished, production-ready collaborative workspace product.
+
+---
+
+## Phase I.1: Production Readiness Corrections (Completed & Verified)
+
+- **Deliverables**:
+  - **Readiness Health Check Semantics & Strict Sanitization**:
+    - Clearly documented contract in `src/app/api/health/route.ts`: represents a dependency readiness check returning HTTP 503 when required dependencies fail or are unconfigured.
+    - Bounded, safe, non-destructive storage connectivity probe implemented in `src/lib/storage.ts` using `headObject` on a probe key (`workspaces/health/artifacts/probe/blobs/check`) with 3s timeout.
+    - Zero information leakage: raw database exceptions, connection strings, hostnames, ports, bucket names, provider driver names, environment tags, and uptime removed from public health responses.
+    - Comprehensive unit test suite in `tests/unit/health.test.ts` covering database failure, missing storage configuration, storage access failure, missing Liveblocks configuration (503 in production vs 200 degraded in dev), and sanitized responses.
+  - **Environment-Safe Demo Safeguards**:
+    - Guarded demo credential autofill in `src/app/login/page.tsx` behind `process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_ENABLE_DEMO_LOGIN === "true"`. Predetermined passwords are never exposed in production builds.
+    - Updated `README.md` to clarify that fresh production deployments contain no pre-existing accounts and must be registered via `/register`.
+  - **Deployment Documentation Corrections**:
+    - S3 CORS documentation updated with production domain placeholders and explicit guidance against `*` wildcards.
+    - Replaced invalid S3 wildcard prefix pattern with valid S3 lifecycle rules matching `workspaces/{workspaceId}/artifacts/{artifactId}/staging/{uploadId}` (object tags or serverless cleanup).
+    - Explicitly distinguished completed repository preparation from external operator actions requiring cloud accounts.

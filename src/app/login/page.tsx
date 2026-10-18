@@ -112,18 +112,21 @@ function LoginForm() {
             )}
           </Button>
 
-          <div className="pt-2 text-center">
-            <button
-              type="button"
-              onClick={() => {
-                setEmail("lead.architect@syncspace.dev");
-                setPassword("Password123!");
-              }}
-              className="text-[11px] text-muted-foreground hover:text-foreground hover:underline transition"
-            >
-              Demo credentials: lead.architect@syncspace.dev
-            </button>
-          </div>
+          {process.env.NODE_ENV !== "production" ||
+          process.env.NEXT_PUBLIC_ENABLE_DEMO_LOGIN === "true" ? (
+            <div className="pt-2 text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail("lead.architect@syncspace.dev");
+                  setPassword("Password123!");
+                }}
+                className="text-[11px] text-muted-foreground hover:text-foreground hover:underline transition"
+              >
+                Development autofill: lead.architect@syncspace.dev
+              </button>
+            </div>
+          ) : null}
         </form>
 
         <div className="relative py-2 text-center text-xs after:absolute after:inset-0 after:top-1/2 after:z-0 after:flex after:items-center after:border-t after:border-border">

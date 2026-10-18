@@ -117,7 +117,22 @@ SyncSpace is a production-grade fullstack collaborative platform built with Next
 ## 5. Production Deployment Guide
 
 ### Deployment Architecture: Vercel + Neon + AWS S3 + Liveblocks
-This stack is recommended because Next.js 15 App Router runs natively on Vercel with zero cold-start routing overhead, Neon provides serverless autoscaling PostgreSQL with instant connection pooling, S3 provides 99.999999999% durable private storage, and Liveblocks delivers sub-50ms WebSocket multiplayer state synchronization.
+This stack is recommended because Next.js 15 App Router runs natively on Vercel with zero cold-start routing overhead, Neon provides serverless autoscaling PostgreSQL with instant connection pooling, S3 provides durable private object storage, and Liveblocks delivers low-latency WebSocket multiplayer state synchronization.
+
+### Repository Preparation Status vs. External Operator Actions
+- **100% Prepared in Repository (Ready for Deployment):**
+  - Next.js 15 App Router monolith with dynamic server routes and static pages.
+  - Prisma ORM schema with 8 additive PostgreSQL migrations (`npm run migrate:deploy`).
+  - Hardened Better Auth authentication with secure HTTPS cookies, dynamic trusted origins, and build-phase secret isolation.
+  - Safe, non-destructive dependency readiness probe (`GET /api/health`).
+  - Strict HTTP security headers in `vercel.json` and zero-leakage production bundles.
+- **External Operator Actions Required (Needs Cloud Accounts & Explicit Operator Credentials):**
+  1. Provision a Neon PostgreSQL 16 database and apply schema migrations.
+  2. Create an AWS S3 bucket (or Cloudflare R2), configure CORS for the deployed origin, and create IAM credentials.
+  3. Create a Liveblocks Cloud project and obtain the secret key (`LIVEBLOCKS_SECRET_KEY`).
+  4. Link the repository to Vercel, populate production environment variables, and trigger the live deployment.
+
+---
 
 ### 1. Database Provisioning (Neon / Supabase)
 1. Create a PostgreSQL 16 database instance.
@@ -127,23 +142,36 @@ This stack is recommended because Next.js 15 App Router runs natively on Vercel 
    DATABASE_URL="postgresql://...pooler...?sslmode=require" npx prisma migrate deploy
    ```
 
-### 2. Private Object Storage Provisioning (AWS S3)
-1. Create a dedicated S3 bucket: `syncspace-attachments-prod`.
+### 2. Private Object Storage Provisioning (AWS S3 / Cloudflare R2)
+1. Create a dedicated private S3 bucket: `syncspace-attachments-prod`.
 2. **Enable Block all public access** (all 4 settings ON).
 3. **Enable Default Encryption** (Amazon S3 managed SSE-S3 or AWS KMS).
 4. **Configure CORS:**
+   Configure `AllowedOrigins` with the exact HTTPS origin(s) of your deployed Next.js application. Never use wildcard `*` in production.
    ```json
    [
      {
        "AllowedHeaders": ["*"],
        "AllowedMethods": ["PUT", "GET"],
-       "AllowedOrigins": ["https://syncspace.dev"],
+       "AllowedOrigins": [
+         "https://your-production-domain.com",
+         "https://your-preview-domain.vercel.app"
+       ],
        "ExposeHeaders": ["ETag"],
        "MaxAgeSeconds": 3600
      }
    ]
    ```
-5. **Configure Lifecycle Rules:** Add an expiration rule on prefix `workspaces/*/artifacts/*/staging/` to automatically delete abandoned staging uploads older than 1 day.
+5. **Configure Staging Lifecycle Rules:**
+   SyncSpace stores attachment objects using the key layout:
+   - Staging uploads: `workspaces/{workspaceId}/artifacts/{artifactId}/staging/{uploadId}`
+   - Promoted blobs: `workspaces/{workspaceId}/artifacts/{artifactId}/blobs/{blobId}`
+
+   *Important*: Amazon S3 Lifecycle rule prefixes only support literal string prefixes; wildcards (`*`) or regex expressions are treated as literal characters and will not match dynamic path segments.
+   To expire uncompleted staging uploads matching the key layout:
+   - **Recommended Lifecycle Filter by Object Tag:** Configure an S3 Lifecycle rule targeting objects with the tag `status=staging` (or `lifecycle=staging`) to expire after 1 day.
+   - **Automated Cleaner Function:** Alternatively, deploy an AWS Lambda scheduled via EventBridge cron to periodically sweep and delete abandoned objects under `/staging/` prefixes older than 24 hours.
+   - **Dedicated Staging Bucket (Alternative):** In environments requiring prefix-only expiration rules, route staged uploads to a dedicated staging bucket with a root lifecycle rule.
 6. **IAM Policy:** Grant an IAM user access strictly to the bucket:
    ```json
    {
@@ -166,16 +194,17 @@ This stack is recommended because Next.js 15 App Router runs natively on Vercel 
 ### 4. Vercel Deployment
 1. Import the repository into Vercel.
 2. In Project Settings &rarr; Environment Variables, add all required production variables:
-   - `DATABASE_URL`
-   - `BETTER_AUTH_SECRET` (`openssl rand -base64 32`)
-   - `BETTER_AUTH_URL` (`https://your-domain.com`)
-   - `NEXT_PUBLIC_APP_URL` (`https://your-domain.com`)
-   - `BETTER_AUTH_TRUSTED_ORIGINS` (`https://your-domain.com`)
+   - `DATABASE_URL` (pooled connection string)
+   - `DIRECT_URL` (direct connection string for schema migrations)
+   - `BETTER_AUTH_SECRET` (generate via `openssl rand -base64 32`)
+   - `BETTER_AUTH_URL` (`https://your-production-domain.com`)
+   - `NEXT_PUBLIC_APP_URL` (`https://your-production-domain.com`)
+   - `BETTER_AUTH_TRUSTED_ORIGINS` (`https://your-production-domain.com,https://your-preview-domain.vercel.app`)
    - `LIVEBLOCKS_SECRET_KEY` (`sk_prod_...`)
    - `STORAGE_PROVIDER` (`s3`)
    - `S3_BUCKET_NAME`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`
-3. Deploy. Vercel automatically runs `npx prisma generate && next build`.
-4. Verify deployment health at `https://your-domain.com/api/health`.
+3. Deploy. Vercel automatically runs `npm run build`.
+4. Verify deployment health at `https://your-production-domain.com/api/health`.
 
 ### 5. Rollback Procedure
 - **Application Rollback:** In Vercel, select the previous stable deployment and click **Promote to Production** for instant zero-downtime rollback.
@@ -225,14 +254,30 @@ npm audit --omit=dev
 
 ## 8. Demonstration Checklist
 
-To safely demonstrate SyncSpace without exposing real credentials:
-1. Open [http://localhost:3000](http://localhost:3000) or your production domain.
-2. Click **Enter Workspace** or navigate to `/login`.
-3. Use the **Demo credentials** link to log in as `lead.architect@syncspace.dev`.
-4. Open a second browser window (e.g. Incognito or separate profile) and register a second account (`staff.engineer@syncspace.dev`).
-5. In Workspace Settings, invite the second user to the workspace.
-6. Open a Collaborative Document in both windows: observe simultaneous character keystrokes, presence badges, and section anchors.
-7. Open a Collaborative Whiteboard in both windows: draw shapes and observe real-time element synchronization without canvas conflicts.
-8. Press `Cmd+K` / `Ctrl+K` to search across all documents and whiteboards instantly.
-9. Verify attachment upload: upload a PDF or image, preview inline, and verify SHA-256 integrity download.
-10. Check `/api/health` to demonstrate 200 OK service uptime.
+To safely evaluate and demonstrate SyncSpace across environments:
+
+### Environment Credentials & Demo Account Policy
+- **Fresh Production Deployments:** A fresh production database contains **no pre-existing accounts**. Demo credential autofill is strictly disabled by default (`NODE_ENV === "production"`) to protect production environments from shared credentials. In production, register your initial administrator account directly via `/register`.
+- **Local Development & Staging Instances:** In local development (`NODE_ENV !== "production"`), the login screen provides a convenience autofill helper (`Development autofill: lead.architect@syncspace.dev`) populated when developing against the seeded local database. For dedicated demo deployments, autofill can be enabled explicitly by configuring `NEXT_PUBLIC_ENABLE_DEMO_LOGIN="true"`.
+
+### Guided Demonstration Steps
+1. **Access Application:** Open `http://localhost:3000` (local dev) or your deployed production domain.
+2. **Account Sign-in / Registration:**
+   - In local dev: Click **Development autofill** on `/login` to sign in as `lead.architect@syncspace.dev`, or register a new user.
+   - In production: Click **Create an account** (`/register`) to register your primary user account.
+3. **Multi-User Real-Time Sync:**
+   - Open a second browser window (e.g., Incognito or a separate browser profile) and register a collaborator account (`staff.engineer@...`).
+   - In Workspace Settings (`/app/settings`), invite the second user to the workspace.
+4. **Collaborative Document Editing:**
+   - Open the same document in both windows simultaneously.
+   - Observe live character keystrokes, collaborator presence indicators, and document outline navigation.
+5. **Collaborative Whiteboard Canvas:**
+   - Open the same whiteboard in both windows.
+   - Draw shapes, add text nodes, and observe instant CRDT element synchronization without canvas state conflicts.
+6. **Unified Search & Command Palette:**
+   - Press `Cmd+K` / `Ctrl+K` to search across all documents, whiteboards, and projects with instant keyboard navigation.
+7. **Attachment Storage & Integrity:**
+   - In any document or whiteboard, upload an attachment (PDF, image, or text file).
+   - Verify inline preview and download with verified SHA-256 integrity checks.
+8. **Dependency Readiness Probe:**
+   - Request `GET /api/health` to confirm overall status `200 OK` (`healthy` or `degraded` in dev).

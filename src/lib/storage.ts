@@ -84,6 +84,10 @@ export interface StorageProvider {
   }): Promise<{ url: string; expiresInSeconds: number }>;
 
   deleteObject(storageKey: string): Promise<void>;
+
+  checkConnectivity?(
+    timeoutMs?: number
+  ): Promise<{ reachable: boolean; latencyMs?: number }>;
 }
 
 const STAGING_STORAGE_KEY_PATTERN =
@@ -94,6 +98,9 @@ const FINAL_STORAGE_KEY_PATTERN =
 
 const SAFE_STORAGE_KEY_PATTERN =
   /^workspaces\/[a-zA-Z0-9_-]+\/artifacts\/[a-zA-Z0-9_-]+\/(?:staging|blobs)\/[a-zA-Z0-9_-]+$/;
+
+export const HEALTH_CHECK_PROBE_KEY =
+  "workspaces/health/artifacts/probe/blobs/check";
 
 /**
  * Validates that a storageKey adheres strictly to the generated internal key format
@@ -488,6 +495,28 @@ export class S3StorageProvider implements StorageProvider {
       );
     }
   }
+
+  async checkConnectivity(
+    timeoutMs: number = 3000
+  ): Promise<{ reachable: boolean; latencyMs?: number }> {
+    const start = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const probePromise = this.headObject(HEALTH_CHECK_PROBE_KEY);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new StorageError("S3 storage connectivity probe timed out.", 504)),
+          timeoutMs
+        );
+      });
+      await Promise.race([probePromise, timeoutPromise]);
+      return { reachable: true, latencyMs: Date.now() - start };
+    } catch {
+      return { reachable: false };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 }
 
 /**
@@ -674,6 +703,20 @@ export class LocalFileStorageProvider implements StorageProvider {
       await fs.unlink(metaPath);
     } catch {
       // Ignore missing companion meta file
+    }
+  }
+
+  async checkConnectivity(
+    _timeoutMs: number = 3000
+  ): Promise<{ reachable: boolean; latencyMs?: number }> {
+    const start = Date.now();
+    try {
+      await fs.access(this.rootDir).catch(async () => {
+        await fs.mkdir(this.rootDir, { recursive: true });
+      });
+      return { reachable: true, latencyMs: Date.now() - start };
+    } catch {
+      return { reachable: false };
     }
   }
 }
@@ -878,6 +921,15 @@ export class InMemoryStorageProvider implements StorageProvider {
     }
     this.store.delete(storageKey);
   }
+
+  async checkConnectivity(
+    _timeoutMs: number = 3000
+  ): Promise<{ reachable: boolean; latencyMs?: number }> {
+    if (this.failNextHead || this.failNextGet) {
+      return { reachable: false };
+    }
+    return { reachable: true, latencyMs: 0 };
+  }
 }
 
 let testStorageOverride: StorageProvider | null = null;
@@ -890,6 +942,43 @@ export function setStorageProviderForTests(
   provider: StorageProvider | null
 ): void {
   testStorageOverride = provider;
+}
+
+/**
+ * Resets cached default provider and test overrides for clean test isolation.
+ */
+export function resetStorageProviderForTests(): void {
+  testStorageOverride = null;
+  cachedDefaultProvider = null;
+}
+
+/**
+ * Safe, bounded, non-destructive connectivity probe for the active storage provider.
+ */
+export async function checkStorageConnectivity(
+  provider: StorageProvider,
+  timeoutMs: number = 3000
+): Promise<{ reachable: boolean; latencyMs?: number }> {
+  if (typeof provider.checkConnectivity === "function") {
+    return provider.checkConnectivity(timeoutMs);
+  }
+  const start = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const probePromise = provider.headObject(HEALTH_CHECK_PROBE_KEY);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new StorageError("Storage connectivity probe timed out.", 504)),
+        timeoutMs
+      );
+    });
+    await Promise.race([probePromise, timeoutPromise]);
+    return { reachable: true, latencyMs: Date.now() - start };
+  } catch {
+    return { reachable: false };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
